@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A" />
+      <stop offset="100%" stop-color="#020617" />
+    </linearGradient>
+    <linearGradient id="cloudGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#0284C7" />
+    </linearGradient>
+    <linearGradient id="boltGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047" />
+      <stop offset="100%" stop-color="#EAB308" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background Squircle -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bgGrad)" stroke="#1E293B" stroke-width="4" />
+
+  <!-- Radar Rings behind cloud -->
+  <circle cx="256" cy="230" r="140" fill="none" stroke="#38BDF8" stroke-opacity="0.15" stroke-width="4" stroke-dasharray="12 12" />
+  <circle cx="256" cy="230" r="90" fill="none" stroke="#0284C7" stroke-opacity="0.25" stroke-width="3" />
+
+  <!-- Main Weather Cloud -->
+  <g filter="url(#glow)">
+    <path d="M190 280 C155 280 130 255 130 220 C130 190 152 165 182 161 C196 125 230 100 270 100 C318 100 358 135 366 182 C395 188 416 214 416 244 C416 278 388 306 354 306 L190 306 Z"
+          fill="url(#cloudGrad)" />
+  </g>
+
+  <!-- High-contrast Lightning Bolt / Radar Pulse -->
+  <polygon points="266,270 230,340 276,340 240,420 310,326 272,326" fill="url(#boltGrad)" />
+
+  <!-- Raindrops -->
+  <ellipse cx="170" cy="350" rx="7" ry="16" transform="rotate(20 170 350)" fill="#38BDF8" opacity="0.85" />
+  <ellipse cx="350" cy="355" rx="7" ry="16" transform="rotate(20 350 355)" fill="#38BDF8" opacity="0.85" />
+
+  <!-- Text Badge -->
+  <text x="256" y="468" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-weight="800" font-size="34" fill="#94A3B8" letter-spacing="3">CLIMARC</text>
+</svg>

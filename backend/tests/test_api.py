@@ -63,3 +63,16 @@ def test_api_accuracy_endpoint():
     assert data["city"] == "rio_cuarto"
     assert "samples_count" in data
     assert "status" in data
+
+
+def test_cors_headers():
+    resp = client.options(
+        "/api/weather",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
