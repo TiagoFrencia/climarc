@@ -1,5 +1,6 @@
 import re
 import math
+import time
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 import httpx
@@ -11,6 +12,46 @@ METAR_URL = "https://aviationweather.gov/api/data/metar"
 WEATHER_CODES_REGEX = re.compile(
     r"\b(\+|-|VC)?(?:(TS|SH|FZ|BL|DR)(RA|DZ|SN|SG|IC|PL|GR|GS|UP)?|(RA|DZ|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS|DS))\b"
 )
+
+# In-memory cache for live METAR observations (5 min TTL to capture SPECI and hourly reports promptly)
+_METAR_CACHE: Dict[str, Dict[str, Any]] = {}
+_METAR_CACHE_TIME: float = 0.0
+METAR_CACHE_TTL_SECONDS: float = 300.0  # 5 minutes
+
+
+def parse_sky_condition(raw_metar: Optional[str], clouds_data: Optional[Any] = None) -> str:
+    """
+    Parses cloud coverage from raw METAR or JSON clouds data.
+    Hierarchy: overcast > broken > scattered > few > clear > unknown.
+    Returns: 'clear', 'few', 'scattered', 'broken', 'overcast', 'unknown'
+    """
+    raw = (raw_metar or "").upper()
+
+    covers = set()
+    if isinstance(clouds_data, list):
+        for c in clouds_data:
+            if isinstance(c, dict):
+                cov = str(c.get("cover", "")).upper()
+                if cov:
+                    covers.add(cov)
+
+    # 1. Overcast (8/8)
+    if re.search(r"\bOVC(?:\d{3}|/{3})?(?:CB|TCU)?\b", raw) or "OVC" in covers:
+        return "overcast"
+    # 2. Broken (5-7/8)
+    if re.search(r"\bBKN(?:\d{3}|/{3})?(?:CB|TCU)?\b", raw) or "BKN" in covers:
+        return "broken"
+    # 3. Scattered (3-4/8)
+    if re.search(r"\bSCT(?:\d{3}|/{3})?(?:CB|TCU)?\b", raw) or "SCT" in covers:
+        return "scattered"
+    # 4. Few (1-2/8)
+    if re.search(r"\bFEW(?:\d{3}|/{3})?(?:CB|TCU)?\b", raw) or "FEW" in covers:
+        return "few"
+    # 5. Clear (0/8)
+    if re.search(r"\b(CAVOK|SKC|CLR|NSC|NCD)\b", raw) or any(c in covers for c in ("CAVOK", "SKC", "CLR", "NSC", "NCD", "CLEAR")):
+        return "clear"
+
+    return "unknown"
 
 
 def calculate_relative_humidity(temp_c: Optional[float], dewp_c: Optional[float]) -> Optional[float]:
@@ -52,14 +93,25 @@ def extract_wx_codes(raw_metar: str, wx_string: Optional[str] = None) -> List[st
 
 async def fetch_metar_observations(
     station_ids: Optional[List[str]] = None,
-    client: Optional[httpx.AsyncClient] = None
+    client: Optional[httpx.AsyncClient] = None,
+    force_refresh: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Fetches live METAR reports from aviationweather.gov for requested stations.
     Parses and persists readings into SQLite metar_history.
+    Caches results in-memory with a 5-minute TTL to capture SPECI and hourly reports promptly.
     Falls back gracefully to SQLite cache on network issues.
     """
+    global _METAR_CACHE, _METAR_CACHE_TIME
+
     stations = station_ids or ["SAOC", "SACO", "SAOR", "SAOL"]
+    now_ts = time.time()
+
+    # Serve from in-memory cache if fresh and covers requested stations
+    if not force_refresh and _METAR_CACHE and (now_ts - _METAR_CACHE_TIME) < METAR_CACHE_TTL_SECONDS:
+        if all(s in _METAR_CACHE for s in stations):
+            return {s: _METAR_CACHE[s] for s in stations}
+
     ids_param = ",".join(stations)
     url = f"{METAR_URL}?ids={ids_param}&format=json"
     headers = {"User-Agent": settings.USER_AGENT}
@@ -116,6 +168,7 @@ async def fetch_metar_observations(
                         age_minutes = round((now - obs_dt).total_seconds() / 60.0, 1)
 
                     wx_codes = extract_wx_codes(raw_ob, wx_string)
+                    sky_condition = parse_sky_condition(raw_ob, item.get("clouds"))
 
                     # Persist into database for history and pressure trend calculation
                     if obs_time_utc:
@@ -144,6 +197,7 @@ async def fetch_metar_observations(
                         "raw_metar": raw_ob,
                         "wx_string": wx_string,
                         "wx_codes": wx_codes,
+                        "sky_condition": sky_condition,
                         "source": "aviationweather.gov",
                     }
     except Exception as exc:
@@ -183,6 +237,7 @@ async def fetch_metar_observations(
                     "raw_metar": raw,
                     "wx_string": None,
                     "wx_codes": extract_wx_codes(raw),
+                    "sky_condition": parse_sky_condition(raw),
                     "source": "metar_history_cache",
                 }
             else:
@@ -200,8 +255,17 @@ async def fetch_metar_observations(
                     "raw_metar": "",
                     "wx_string": None,
                     "wx_codes": [],
+                    "sky_condition": "unknown",
                     "source": "unavailable",
                 }
+
+    # Store fresh entries in in-memory cache
+    if results:
+        for k, v in results.items():
+            _METAR_CACHE[k] = v
+        _METAR_CACHE_TIME = now_ts
+
+    return results
 
     return results
 

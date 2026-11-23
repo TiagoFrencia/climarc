@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from ..database import save_forecast_snapshots
 from .ml_corrector import ml_corrector
-from .metar_service import calculate_qnh_trend
+from .metar_service import calculate_qnh_trend, parse_sky_condition
 
 CORDOBA_TZ = timezone(timedelta(hours=-3))
 
@@ -139,6 +139,7 @@ def generate_ensemble_forecast(
     lon: Optional[float] = None,
     enable_ml: bool = True,
     metar_history_records: Optional[List[Dict[str, Any]]] = None,
+    center_brightness_temp_c: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Blends multi-model numerical forecasts:
@@ -614,16 +615,76 @@ def generate_ensemble_forecast(
         else:
             dew_point_c = calculate_dew_point(h0["temperature_c"], h0["relative_humidity_pct"])
 
+        # METAR freshness checks
+        metar_age = metar_data.get("age_minutes") if metar_data else None
+        is_fresh_45 = metar_data is not None and metar_age is not None and metar_age <= 45.0
+        is_fresh_60 = metar_data is not None and metar_age is not None and metar_age <= 60.0
+
         metar_w_code = None
         metar_wx_raw = None
-        metar_is_precip = False
-        if metar_fresh and metar_data:
-            metar_w_code, metar_wx_raw, metar_is_precip = parse_metar_phenomenon(metar_data)
+        raw_has_precip = False
+        if metar_data:
+            metar_w_code, metar_wx_raw, raw_has_precip = parse_metar_phenomenon(metar_data)
 
+        # Rain and storm phenomena in METAR expire strictly at 45 minutes
+        # If METAR is > 45 min (e.g. 66 min), a summer storm/rain has passed and cannot force current rain
+        has_rain_storm_metar = raw_has_precip or (metar_w_code is not None and metar_w_code >= 51)
+        if has_rain_storm_metar and not is_fresh_45:
+            metar_w_code = None
+            raw_has_precip = False
+
+        # Strict rule for 'is_precipitating_now': ONLY True if fresh METAR (< 45 min) reports runway precipitation
+        # NEVER mark is_precipitating_now = True merely because numerical model forecast precip_mm >= 0.1
+        is_precipitating_now = bool(is_fresh_45 and raw_has_precip)
+
+        # Apply METAR weather code override if fresh
         if metar_w_code is not None:
-            h0["weather_code"] = metar_w_code
+            if is_fresh_45 or (metar_fresh and metar_w_code < 51):
+                h0["weather_code"] = metar_w_code
 
-        is_precipitating_now = metar_is_precip or (h0.get("precip_mm", 0.0) >= 0.1)
+        # Bidirectional METAR sky override:
+        # If METAR is fresh (< 60 min), reports NO precipitation or thunderstorm,
+        # and sky_condition is 'clear', 'few', or 'scattered', override numerical model rain/storm (>= 51):
+        # 'clear' -> 0 (Despejado)
+        # 'few' -> 1 (Mayormente despejado)
+        # 'scattered' -> 2 (Parcialmente nublado)
+        # 'broken' / 'overcast' (fresh < 45 min, no rain in METAR) -> lower to 3 (Nublado) unless GOES-19 has active cold core
+        sky_cond = metar_data.get("sky_condition") if metar_data else None
+        if sky_cond is None and metar_data:
+            sky_cond = parse_sky_condition(metar_data.get("raw_metar"))
+
+        raw_metar_str = (metar_data.get("raw_metar") or "").upper() if metar_data else ""
+        has_thunder = bool(
+            re.search(r"\b(TS|TSRA|VCTS|\+TSRA|-TSRA|\+TS|-TS|SQ|FC|GR|GS)\b", raw_metar_str)
+            or any("TS" in str(c).upper() for c in (metar_data.get("wx_codes") or []))
+        ) if metar_data else False
+
+        if metar_data and not raw_has_precip and not has_thunder:
+            if is_fresh_60 and h0["weather_code"] >= 51:
+                if sky_cond == "clear":
+                    h0["weather_code"] = 0
+                elif sky_cond == "few":
+                    h0["weather_code"] = 1
+                elif sky_cond == "scattered":
+                    h0["weather_code"] = 2
+            elif is_fresh_45 and h0["weather_code"] >= 51 and sky_cond in ("broken", "overcast"):
+                goes_cold_active = (center_brightness_temp_c is not None and center_brightness_temp_c < -25.0)
+                if not goes_cold_active:
+                    h0["weather_code"] = 3
+
+        # GOES-19 Band 13 Satellite Clear Sky Physical Check:
+        # If not precipitating now, and center_brightness_temp_c is available and
+        # (current.temperature_c - center_brightness_temp_c) <= 8.0 °C (satellite IR is measuring warm ground / open sky,
+        # not cold cloud tops of precipitating systems), and model was forcing rain/storm (>= 51):
+        # Correct weather_code to 1 (or 2 if scattered) to eliminate ghost rains when front left.
+        if (
+            not is_precipitating_now
+            and center_brightness_temp_c is not None
+            and h0["weather_code"] >= 51
+        ):
+            temp_diff = h0["temperature_c"] - center_brightness_temp_c
+            if temp_diff <= 8.0:
+                h0["weather_code"] = 2 if sky_cond == "scattered" else 1
 
         current_app_temp = calculate_apparent_temperature(
             h0["temperature_c"],
@@ -669,6 +730,8 @@ def generate_ensemble_forecast(
             "metar_age_minutes": metar_data.get("age_minutes") if metar_data else None,
             "metar_raw": metar_data.get("raw_metar") if metar_data else "",
             "metar_wx_raw": metar_wx_raw,
+            "sky_condition": sky_cond,
+            "center_brightness_temp_c": center_brightness_temp_c,
             "is_precipitating_now": is_precipitating_now,
         }
 
@@ -710,8 +773,8 @@ def generate_executive_summary(
     is_precip = current.get("is_precipitating_now", False)
     curr_t = current.get("temperature_c")
 
-    # 3. Active storm or rain now
-    if w_code in (95, 96, 99) or (is_precip and w_code >= 61):
+    # 3. Active storm or rain now (strictly requires is_precip for rain, or active severe storm)
+    if is_precip and w_code >= 51:
         phenom = "Tormenta fuerte" if w_code in (96, 99) else "Tormenta" if w_code == 95 else "Lluvia"
         # Look for when it clears in the next 12h
         clear_hour = None
@@ -732,6 +795,11 @@ def generate_executive_summary(
             summary = f"{phenom} hasta las {clear_hour}, luego cielo mejorando."
         else:
             summary = f"{phenom} activa en la zona con ambiente húmedo e inestable."
+        return summary[:120]
+    elif w_code in (95, 96, 99):
+        # Thunderstorm in the vicinity without runway precipitation
+        phenom = "Tormenta fuerte" if w_code in (96, 99) else "Tormenta"
+        summary = f"{phenom} en la zona con actividad eléctrica y ambiente inestable."
         return summary[:120]
 
     # 4. Rain or storm expected in the upcoming 8 hours

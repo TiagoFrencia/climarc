@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import pytest
-from backend.app.services.ensemble_engine import generate_ensemble_forecast
+from backend.app.services.ensemble_engine import generate_ensemble_forecast, generate_executive_summary
 
 REF_TIME = datetime(2026, 11, 23, 0, 0, 0, tzinfo=timezone.utc)
 
@@ -435,3 +435,191 @@ def test_daily_fused_hourly_integration(sample_open_meteo):
     # Daily[1] max must be 21.0 and min 13.0 (from tomorrow's fused hourly)
     assert d1["temperature_max_c"] == 21.0
     assert d1["temperature_min_c"] == 13.0
+
+
+def test_strict_live_rain_truth_no_ghost_rain(sample_open_meteo):
+    """
+    CRITERIO 1: Modelo con 1.0 mm pero sin METAR de lluvia -> is_precipitating_now DEBE ser False.
+    Un modelo es pronóstico, no observación en vivo.
+    """
+    h0 = sample_open_meteo["hourly"][0]
+    h0["models"]["ecmwf_ifs025"]["precip_mm"] = 1.0
+    h0["models"]["icon_seamless"]["precip_mm"] = 1.0
+    h0["models"]["gfs_seamless"]["precip_mm"] = 1.0
+    h0["models"]["ecmwf_ifs025"]["weather_code"] = 61
+
+    # Case A: Without any METAR
+    res_no_metar = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=None,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+    assert res_no_metar["current"]["is_precipitating_now"] is False
+
+    # Case B: With fresh METAR that does NOT report runway precipitation
+    metar_fair = {
+        "icao": "SAOC",
+        "age_minutes": 15.0,
+        "temp_c": 22.0,
+        "dewp_c": 12.0,
+        "humidity_pct": 53.0,
+        "wind_speed_kmh": 14.0,
+        "qnh_hpa": 1014.0,
+        "raw_metar": "METAR SAOC 230000Z 08008KT CAVOK 22/12 Q1014",
+        "sky_condition": "clear",
+    }
+    res_metar_fair = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=metar_fair,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+    assert res_metar_fair["current"]["is_precipitating_now"] is False
+
+
+def test_bidirectional_metar_sky_override(sample_open_meteo):
+    """
+    CRITERIO 2: METAR fresco con CAVOK/FEW sin lluvia + modelo con weather_code=61 -> sobrescribe a 0/1.
+    """
+    h0 = sample_open_meteo["hourly"][0]
+    h0["models"]["ecmwf_ifs025"]["weather_code"] = 61
+    h0["models"]["icon_seamless"]["weather_code"] = 61
+    h0["models"]["gfs_seamless"]["weather_code"] = 61
+
+    # Subcase A: CAVOK -> 0 (Despejado)
+    metar_cavok = {
+        "icao": "SAOC",
+        "age_minutes": 25.0,
+        "temp_c": 24.0,
+        "dewp_c": 11.0,
+        "humidity_pct": 45.0,
+        "wind_speed_kmh": 12.0,
+        "qnh_hpa": 1015.0,
+        "raw_metar": "METAR SAOC 230000Z 07006KT CAVOK 24/11 Q1015",
+        "sky_condition": "clear",
+    }
+    res_cavok = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=metar_cavok,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+    assert res_cavok["current"]["weather_code"] == 0
+    assert res_cavok["hourly"][0]["weather_code"] == 0
+    assert res_cavok["current"]["is_precipitating_now"] is False
+
+    # Subcase B: FEW -> 1 (Mayormente despejado)
+    metar_few = {
+        "icao": "SAOC",
+        "age_minutes": 20.0,
+        "temp_c": 23.0,
+        "dewp_c": 13.0,
+        "humidity_pct": 53.0,
+        "wind_speed_kmh": 10.0,
+        "qnh_hpa": 1014.0,
+        "raw_metar": "METAR SAOC 230000Z 09005KT 9999 FEW030 23/13 Q1014",
+        "sky_condition": "few",
+    }
+    res_few = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=metar_few,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+    assert res_few["current"]["weather_code"] == 1
+    assert res_few["hourly"][0]["weather_code"] == 1
+    assert res_few["current"]["is_precipitating_now"] is False
+
+
+def test_stale_metar_rain_does_not_override(sample_open_meteo):
+    """
+    CRITERIO 3: METAR viejo (66 min) con -RA -> NO fuerza lluvia actual ni is_precipitating_now.
+    """
+    h0 = sample_open_meteo["hourly"][0]
+    h0["models"]["ecmwf_ifs025"]["weather_code"] = 1
+    h0["models"]["icon_seamless"]["weather_code"] = 1
+    h0["models"]["gfs_seamless"]["weather_code"] = 1
+
+    metar_stale_rain = {
+        "icao": "SAOC",
+        "age_minutes": 66.0,
+        "temp_c": 18.0,
+        "dewp_c": 16.0,
+        "humidity_pct": 88.0,
+        "wind_speed_kmh": 16.0,
+        "qnh_hpa": 1012.0,
+        "wx_string": "-RA",
+        "raw_metar": "METAR SAOC 230000Z 04008KT 5000 -RA BKN020 18/16 Q1012",
+        "sky_condition": "broken",
+    }
+
+    res = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=metar_stale_rain,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+
+    # Stale rain METAR must NOT trigger live precipitation or force rain code
+    assert res["current"]["is_precipitating_now"] is False
+    assert res["current"]["weather_code"] != 51
+    assert res["hourly"][0]["weather_code"] != 51
+
+
+def test_goes19_clear_sky_override(sample_open_meteo):
+    """
+    CRITERIO 4: GOES-19 con center_brightness_temp_c = 16°C y surface_temp = 18°C + modelo con lluvia -> corrige a cielo despejado (1).
+    """
+    h0 = sample_open_meteo["hourly"][0]
+    h0["models"]["ecmwf_ifs025"]["temperature_c"] = 18.0
+    h0["models"]["icon_seamless"]["temperature_c"] = 18.0
+    h0["models"]["gfs_seamless"]["temperature_c"] = 18.0
+    h0["models"]["ecmwf_ifs025"]["weather_code"] = 61  # Model forcing rain
+
+    res = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=None,
+        reference_time=REF_TIME,
+        enable_ml=False,
+        center_brightness_temp_c=16.0,  # 18°C surface - 16°C satellite TB = 2°C <= 8.0°C (warm ground)
+    )
+
+    assert res["current"]["is_precipitating_now"] is False
+    assert res["current"]["weather_code"] == 1
+    assert res["hourly"][0]["weather_code"] == 1
+
+
+def test_executive_summary_never_claims_active_rain_when_not_precipitating():
+    """
+    CRITERIO 5: Asegurar que generate_executive_summary nunca diga 'Lluvia activa en la zona' si is_precipitating_now es False.
+    """
+    current = {
+        "weather_code": 61,
+        "is_precipitating_now": False,
+        "temperature_c": 19.0,
+        "wind_speed_kmh": 12.0,
+        "wind_direction_deg": 180.0,
+    }
+    hourly = [
+        {"timestamp_utc": "2026-11-23T22:00:00Z", "weather_code": 61, "precip_mm": 1.0, "precip_prob_pct": 70},
+        {"timestamp_utc": "2026-11-23T23:00:00Z", "weather_code": 61, "precip_mm": 0.5, "precip_prob_pct": 50},
+    ]
+    daily = [{"temperature_max_c": 22.0, "temperature_min_c": 14.0}]
+
+    summary = generate_executive_summary(current=current, hourly=hourly, daily=daily)
+    assert "Lluvia activa en la zona" not in summary
+
+

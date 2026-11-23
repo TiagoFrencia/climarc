@@ -275,9 +275,10 @@ async def get_route_weather(
     mid_lon = round((orig_lon + target_lon) / 2.0, 4)
 
     cache_key = f"route_weather:{orig_cfg['key']}:{dest_key}:{target_lat:.4f}_{target_lon:.4f}"
-    cached = get_cached_payload(cache_key, max_age_seconds=900)
-    if cached:
-        return cached
+    if client is None:
+        cached = get_cached_payload(cache_key, max_age_seconds=900)
+        if cached:
+            return cached
 
     close_client = False
     if client is None:

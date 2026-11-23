@@ -99,26 +99,27 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
     glowColor = 'bg-indigo-500/15';
   }
 
-  // QNH tendency label & color
+  // QNH tendency label & color (compact 1-line format to avoid truncation: ↘ -2.0 hPa/3h / ↗ +1.8 hPa/3h / → Estable)
   const qnhTrend = current.qnh_trend;
+  const qnhDelta = current.qnh_delta_3h_hpa;
+  const hasDelta = qnhDelta !== undefined && qnhDelta !== null && Math.abs(qnhDelta) >= 0.1;
+  const deltaStr = hasDelta ? `${qnhDelta > 0 ? '+' : ''}${qnhDelta.toFixed(1)} hPa/3h` : '';
+
   let qnhTrendText = '→ Estable';
   let qnhTrendColor = 'text-slate-400';
+
   if (qnhTrend === 'subiendo') {
-    qnhTrendText = '↗ Subiendo';
+    qnhTrendText = hasDelta ? `↗ ${deltaStr}` : '↗ Subiendo';
     qnhTrendColor = 'text-emerald-400';
   } else if (qnhTrend === 'bajando') {
-    qnhTrendText = '↘ Bajando';
+    qnhTrendText = hasDelta ? `↘ ${deltaStr}` : '↘ Bajando';
     qnhTrendColor = 'text-amber-400';
   } else if (qnhTrend === 'bajando_rapido') {
-    qnhTrendText = '⏬ Bajando rápido';
+    qnhTrendText = hasDelta ? `⏬ ${deltaStr}` : '⏬ Bajando rápido';
     qnhTrendColor = 'text-rose-400 font-bold';
+  } else {
+    qnhTrendText = hasDelta ? `→ ${deltaStr}` : '→ Estable';
   }
-
-  const qnhDelta = current.qnh_delta_3h_hpa;
-  const qnhDeltaText =
-    qnhDelta !== undefined && qnhDelta !== null && qnhDelta !== 0
-      ? ` (${qnhDelta > 0 ? '+' : ''}${qnhDelta.toFixed(1)} hPa/3h)`
-      : '';
 
   // Hail Chip logic: only render if level !== 'sin_riesgo'
   const hasHailRisk = hailRisk && hailRisk.level !== 'sin_riesgo';
@@ -172,11 +173,11 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
           </div>
         </div>
 
-        {/* Resumen Ejecutivo (1-liner) */}
+        {/* Resumen Ejecutivo (1-liner sin truncar, hasta 2 líneas) */}
         {summaryOneLiner && (
-          <div className="mb-2 py-1.5 px-3 rounded-xl bg-slate-900/70 border border-slate-800/80 text-xs font-medium text-slate-200 leading-snug flex items-center gap-2 shadow-inner">
-            <Sparkles className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-            <span className="truncate">{summaryOneLiner}</span>
+          <div className="mb-2 py-1.5 px-3 rounded-xl bg-slate-900/70 border border-slate-800/80 text-xs font-medium text-slate-200 leading-snug flex items-start gap-2 shadow-inner">
+            <Sparkles className="w-3.5 h-3.5 text-sky-400 shrink-0 mt-0.5" />
+            <span className="leading-snug line-clamp-2">{summaryOneLiner}</span>
           </div>
         )}
 
@@ -322,7 +323,6 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
               </div>
               <div className={`text-[10px] ${qnhTrendColor} truncate`}>
                 {qnhTrendText}
-                {qnhDeltaText}
               </div>
             </div>
           </div>
@@ -337,8 +337,12 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
                 Lluvia Próx. Hora
               </div>
               <div className="font-bold text-slate-200 text-sm">
-                {isPrecipNow && maxPrecipMm === 0 ? (
-                  <span className="text-sky-300 font-extrabold animate-pulse">Lloviendo ahora</span>
+                {isPrecipNow ? (
+                  maxPrecipMm > 0 ? (
+                    `${maxPrecipMm.toFixed(1)} mm`
+                  ) : (
+                    <span className="text-sky-300 font-extrabold animate-pulse">Lloviendo ahora</span>
+                  )
                 ) : maxPrecipMm > 0 ? (
                   `${maxPrecipMm.toFixed(1)} mm`
                 ) : (
@@ -347,13 +351,9 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
               </div>
               <div className="text-[10px] text-slate-400">
                 {isPrecipNow ? (
-                  maxPrecipMm > 0 ? (
-                    <span className="text-sky-400 font-medium">Lloviendo ahora</span>
-                  ) : current.metar_wx_raw ? (
-                    `Reporte: ${current.metar_wx_raw}`
-                  ) : (
-                    'Detectado en pista'
-                  )
+                  <span className="text-sky-400 font-medium">
+                    {current.metar_wx_raw ? `Reporte: ${current.metar_wx_raw}` : 'Lloviendo ahora'}
+                  </span>
                 ) : (
                   `Prob: ${precipProb}%`
                 )}

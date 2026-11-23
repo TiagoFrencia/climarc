@@ -153,14 +153,14 @@ async def get_weather(
     cache_key = f"weather:{city_cfg.key}" if (lat is None or lon is None) else f"weather:{lat:.4f}:{lon:.4f}"
 
     if not refresh:
-        cached = get_cached_payload(cache_key, max_age_seconds=900)
+        cached = get_cached_payload(cache_key, max_age_seconds=300)
         if cached:
             return cached
 
     # Fetch live sources
     async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
         # Metar for all 4 sentinel stations in single HTTP call (SAOC, SACO, SAOR, SAOL)
-        metar_map = await fetch_metar_observations(client=client)
+        metar_map = await fetch_metar_observations(client=client, force_refresh=refresh)
         metar_obs = metar_map.get(city_cfg.icao)
 
         # Open-Meteo multi-model (including AIFS, 500hPa shear, freezing level, UV & solar times)
@@ -194,6 +194,12 @@ async def get_weather(
     # Combine alerts: SMN alerts + Local alerts
     all_alerts = list(smn_alerts_res.get("alerts", [])) + local_alerts
 
+    center_bt = None
+    if hail_risk:
+        center_bt = hail_risk.get("center_brightness_temp_c")
+        if center_bt is None and "stage2_details" in hail_risk:
+            center_bt = hail_risk["stage2_details"].get("center_brightness_temp_c")
+
     # Generate Ensemble Forecast
     ensemble = generate_ensemble_forecast(
         city_key=city_cfg.key,
@@ -204,6 +210,7 @@ async def get_weather(
         lat=city_cfg.lat,
         lon=city_cfg.lon,
         metar_history_records=metar_history,
+        center_brightness_temp_c=center_bt if city_cfg.key == "rio_cuarto" else None,
     )
 
     # Executive 1-liner summary

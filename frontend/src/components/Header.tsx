@@ -28,9 +28,10 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenSettings,
   gpsActive,
 }) => {
-  const isNowcast = currentWeather?.nowcast_blended === true;
   const stationName = currentWeather?.metar_station || cityConfig?.icao || 'SAOC';
   const ageMinutes = currentWeather?.metar_age_minutes;
+  const isFreshLive = ageMinutes !== undefined && ageMinutes !== null && ageMinutes <= 45;
+  const isStaleObservation = ageMinutes !== undefined && ageMinutes !== null && ageMinutes > 45 && ageMinutes <= 90;
 
   return (
     <header className="sticky top-0 z-30 bg-[#0B1120]/90 backdrop-blur-md border-b border-slate-800/80 px-4 py-3 transition-colors relative">
@@ -139,19 +140,27 @@ export const Header: React.FC<HeaderProps> = ({
           ) : (
             <>
               <div className="flex items-center gap-1.5">
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    isNowcast ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
-                  }`}
-                />
-                {isNowcast ? (
-                  <span className="text-[11px] font-medium text-emerald-400">
-                    {stationName} en vivo · {formatAgeMinutes(ageMinutes)}
-                  </span>
+                {isFreshLive ? (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <span className="text-[11px] font-medium text-emerald-400">
+                      {stationName} en vivo
+                    </span>
+                  </>
+                ) : isStaleObservation ? (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-amber-400" />
+                    <span className="text-[11px] font-medium text-amber-400">
+                      {stationName} · {formatAgeMinutes(ageMinutes)}
+                    </span>
+                  </>
                 ) : (
-                  <span className="text-[11px] font-medium text-slate-400">
-                    Ensamble + IA ({stationName} {formatAgeMinutes(ageMinutes)})
-                  </span>
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-slate-500" />
+                    <span className="text-[11px] font-medium text-slate-400">
+                      Ensamble + IA ({stationName} {formatAgeMinutes(ageMinutes)})
+                    </span>
+                  </>
                 )}
               </div>
 

@@ -217,6 +217,7 @@ async def scan_goes19_band13(client: Optional[httpx.AsyncClient] = None) -> Dict
         "extreme_pixels_count": 0,
         "severe_pixels_pct": 0.0,
         "min_brightness_temp_c": None,
+        "center_brightness_temp_c": None,
         "timestamp_str": None,
     }
 
@@ -258,6 +259,11 @@ async def scan_goes19_band13(client: Optional[httpx.AsyncClient] = None) -> Dict
         max_px = int(np.max(sector))
         min_temp_c = round((88.0 - max_px) / 1.51, 1)
 
+        # Center brightness temp for clear-sky physical check (3x3 px block centered on Río Cuarto: x=143, y=63)
+        center_block = arr[62:65, 142:145]
+        mean_center_px = float(np.mean(center_block))
+        center_brightness_temp_c = round((88.0 - mean_center_px) / 1.51, 1)
+
         # Detection criteria: at least 4 contiguous or total severe pixels in the sector (~16 km² cell)
         has_severe = severe_pixels >= 4
         has_extreme = extreme_pixels >= 2
@@ -270,6 +276,7 @@ async def scan_goes19_band13(client: Optional[httpx.AsyncClient] = None) -> Dict
             "extreme_pixels_count": extreme_pixels,
             "severe_pixels_pct": severe_pct,
             "min_brightness_temp_c": min_temp_c,
+            "center_brightness_temp_c": center_brightness_temp_c,
             "timestamp_str": latest_time,
         }
 
@@ -485,5 +492,6 @@ async def evaluate_hail_risk(
         "imminent_hail_alert": imminent_hail_active,
         "cirrus_rejected": cirrus_rejected,
         "explanation": explanation,
+        "center_brightness_temp_c": sat_scan.get("center_brightness_temp_c"),
         "stage2_details": sat_scan,
     }
