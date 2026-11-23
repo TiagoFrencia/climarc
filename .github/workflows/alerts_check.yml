@@ -1,0 +1,52 @@
+name: Chequeo Periódico de Alertas
+
+on:
+  schedule:
+    # Corre cada 30 minutos (cuida minutos de GitHub Actions y horas de Render Free Tier)
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check-alerts:
+    name: Evaluar y Despachar Alertas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Despertar Backend y Ejecutar Chequeo
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$BACKEND_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "::warning::Secrets BACKEND_URL o CRON_SECRET no estan configurados en GitHub. Omitiendo chequeo sin error para evitar emails de fallo."
+            exit 0
+          fi
+
+          # Eliminar barra final si existiera
+          CLEAN_URL="${BACKEND_URL%/}"
+
+          echo "1. Despertando backend en ${CLEAN_URL}/api/ping (por si Render Free Tier está en reposo)..."
+          curl -f -s -S --retry 3 --retry-delay 10 --max-time 60 "${CLEAN_URL}/api/ping" || {
+            echo "::error::No se pudo conectar a ${CLEAN_URL}/api/ping tras 3 reintentos."
+            exit 1
+          }
+
+          echo "2. Solicitando chequeo de alertas a ${CLEAN_URL}/api/alerts/check..."
+          RESPONSE=$(curl -s -S -w "\n%{http_code}" -X POST "${CLEAN_URL}/api/alerts/check" \
+            -H "X-CRON-SECRET: ${CRON_SECRET}" \
+            -H "Content-Type: application/json" \
+            --max-time 30)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "Código HTTP recibido: $HTTP_CODE"
+          echo "Respuesta del backend: $BODY"
+
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "::error::El chequeo de alertas falló con código HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          echo "Chequeo de alertas completado exitosamente."

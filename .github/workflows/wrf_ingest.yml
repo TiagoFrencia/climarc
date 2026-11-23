@@ -1,0 +1,63 @@
+name: Extractor WRF-SMN
+
+on:
+  schedule:
+    # Corre cada 6 horas: 02:30, 08:30, 14:30 y 20:30 UTC
+    - cron: '30 2,8,14,20 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-wrf:
+    name: Descargar y Procesar WRF-SMN 4km
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'scripts/requirements-jobs.txt'
+
+      - name: Instalar dependencias pesadas (xarray, s3fs, netcdf4)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements-jobs.txt
+
+      - name: Extraer pronóstico WRF para Río Cuarto y Córdoba
+        timeout-minutes: 15
+        run: |
+          python scripts/fetch_wrf_smn.py --max-hours 48
+
+      - name: Validar integridad del JSON extraído
+        run: |
+          if [ ! -f data/wrf_latest.json ]; then
+            echo "::error::data/wrf_latest.json no fue generado por fetch_wrf_smn.py"
+            exit 1
+          fi
+          python -c "import json; d = json.load(open('data/wrf_latest.json')); assert 'cities' in d; print(f'OK: {len(d.get(\"cities\", {}))} ciudades extraidas.')"
+
+      - name: Publicar en rama huérfana wrf-data (1 solo commit limpio)
+        run: |
+          mkdir -p /tmp/wrf_export
+          cp data/wrf_latest.json /tmp/wrf_export/wrf_latest.json
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Cambiar a rama huerfana sin historial previo para no inflar el repo ni redeployar Render
+          git checkout --orphan wrf-data
+          git rm -rf .
+          cp /tmp/wrf_export/wrf_latest.json ./wrf_latest.json
+          git add wrf_latest.json
+          git commit -m "Auto-update WRF SMN 4km forecast [$(date -u +'%Y-%m-%d %H:%M:%SZ')]"
+          git push --force origin wrf-data

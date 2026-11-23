@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, AsyncMock
 import pytest
@@ -69,8 +70,7 @@ def test_quiet_hours_overnight_and_daytime():
     assert is_in_quiet_hours(dt_day_10, start_hour=7, end_hour=14, quiet_enabled=False) is False
 
 
-@pytest.mark.asyncio
-async def test_priority_1_ignores_quiet_hours(init_clean_db):
+def test_priority_1_ignores_quiet_hours(init_clean_db):
     """Priority 1 (e.g. thunderstorm & hail in METAR) must fire even during quiet hours."""
     db_path = init_clean_db
 
@@ -107,28 +107,30 @@ async def test_priority_1_ignores_quiet_hours(init_clean_db):
     assert "granizo" in types
     assert "tormenta" in types
 
-    with patch(
-        "backend.app.services.alerts_service.send_telegram_alert",
-        new=AsyncMock(return_value={"sent": True, "message_id": 999}),
-    ) as mock_send:
-        result = await process_and_dispatch_alerts(
-            detected_alerts=detected,
-            city_key="rio_cuarto",
-            alert_settings=alert_settings,
-            custom_db_path=db_path,
-            now_utc=now_utc,
-            now_cordoba=now_cordoba,
-        )
+    async def _run():
+        with patch(
+            "backend.app.services.alerts_service.send_telegram_alert",
+            new=AsyncMock(return_value={"sent": True, "message_id": 999}),
+        ) as mock_send:
+            result = await process_and_dispatch_alerts(
+                detected_alerts=detected,
+                city_key="rio_cuarto",
+                alert_settings=alert_settings,
+                custom_db_path=db_path,
+                now_utc=now_utc,
+                now_cordoba=now_cordoba,
+            )
 
-        assert result["sent_count"] >= 2
-        # Priority 1 must not be omitted by quiet hours
-        omitted_quiet = [o for o in result["omitted"] if o.get("reason") == "quiet_hours"]
-        assert len(omitted_quiet) == 0
-        assert mock_send.call_count >= 2
+            assert result["sent_count"] >= 2
+            # Priority 1 must not be omitted by quiet hours
+            omitted_quiet = [o for o in result["omitted"] if o.get("reason") == "quiet_hours"]
+            assert len(omitted_quiet) == 0
+            assert mock_send.call_count >= 2
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_priority_2_respects_quiet_hours(init_clean_db):
+def test_priority_2_respects_quiet_hours(init_clean_db):
     """Priority 2 (preventive: imminent rain, gusts 55 km/h) is omitted during quiet hours."""
     db_path = init_clean_db
 
@@ -161,28 +163,30 @@ async def test_priority_2_respects_quiet_hours(init_clean_db):
     p2_alerts = [a for a in detected if a["priority"] == 2]
     assert len(p2_alerts) >= 2  # rain:lluvia_inminente and wind:rafagas_fuertes
 
-    with patch(
-        "backend.app.services.alerts_service.send_telegram_alert",
-        new=AsyncMock(return_value={"sent": True, "message_id": 100}),
-    ) as mock_send:
-        result = await process_and_dispatch_alerts(
-            detected_alerts=detected,
-            city_key="rio_cuarto",
-            alert_settings=alert_settings,
-            custom_db_path=db_path,
-            now_utc=now_utc,
-            now_cordoba=now_cordoba,
-        )
+    async def _run():
+        with patch(
+            "backend.app.services.alerts_service.send_telegram_alert",
+            new=AsyncMock(return_value={"sent": True, "message_id": 100}),
+        ) as mock_send:
+            result = await process_and_dispatch_alerts(
+                detected_alerts=detected,
+                city_key="rio_cuarto",
+                alert_settings=alert_settings,
+                custom_db_path=db_path,
+                now_utc=now_utc,
+                now_cordoba=now_cordoba,
+            )
 
-        assert result["sent_count"] == 0
-        assert result["omitted_count"] >= 2
-        for o in result["omitted"]:
-            assert o["reason"] == "quiet_hours"
-        mock_send.assert_not_called()
+            assert result["sent_count"] == 0
+            assert result["omitted_count"] >= 2
+            for o in result["omitted"]:
+                assert o["reason"] == "quiet_hours"
+            mock_send.assert_not_called()
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_anti_spam_cooldown_and_escalation_bypass(init_clean_db):
+def test_anti_spam_cooldown_and_escalation_bypass(init_clean_db):
     """
     Verifies anti-spam cooldown prevents duplicate sends during cooldown,
     and escalations (e.g. amarillo -> naranja) immediately bypass cooldown.
@@ -205,99 +209,102 @@ async def test_anti_spam_cooldown_and_escalation_bypass(init_clean_db):
     t0_utc = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
     t0_cba = datetime(2026, 11, 23, 9, 0, tzinfo=CORDOBA_TZ)
 
-    with patch(
-        "backend.app.services.alerts_service.send_telegram_alert",
-        new=AsyncMock(return_value={"sent": True, "message_id": 1}),
-    ):
-        # 1. First send at T0: must be sent
-        res0 = await process_and_dispatch_alerts(
-            detected_alerts=[alert_base],
-            city_key="rio_cuarto",
-            alert_settings=alert_settings,
-            custom_db_path=db_path,
-            now_utc=t0_utc,
-            now_cordoba=t0_cba,
-        )
-        assert res0["sent_count"] == 1
-        assert res0["omitted_count"] == 0
+    async def _run():
+        with patch(
+            "backend.app.services.alerts_service.send_telegram_alert",
+            new=AsyncMock(return_value={"sent": True, "message_id": 1}),
+        ):
+            # 1. First send at T0: must be sent
+            res0 = await process_and_dispatch_alerts(
+                detected_alerts=[alert_base],
+                city_key="rio_cuarto",
+                alert_settings=alert_settings,
+                custom_db_path=db_path,
+                now_utc=t0_utc,
+                now_cordoba=t0_cba,
+            )
+            assert res0["sent_count"] == 1
+            assert res0["omitted_count"] == 0
 
-        # Verify state in SQLite
-        st = get_alert_state("rio_cuarto", "wind:rafagas_fuertes", custom_path=db_path)
-        assert st is not None
-        assert st["last_severity"] == "amarillo"
+            # Verify state in SQLite
+            st = get_alert_state("rio_cuarto", "wind:rafagas_fuertes", custom_path=db_path)
+            assert st is not None
+            assert st["last_severity"] == "amarillo"
 
-    with patch(
-        "backend.app.services.alerts_service.send_telegram_alert",
-        new=AsyncMock(return_value={"sent": True, "message_id": 2}),
-    ) as mock_send_t1:
-        # 2. Resend after 1 hour (T1 = T0 + 1h, within 4h cooldown): must be omitted by cooldown
-        t1_utc = t0_utc + timedelta(hours=1)
-        t1_cba = t0_cba + timedelta(hours=1)
+        with patch(
+            "backend.app.services.alerts_service.send_telegram_alert",
+            new=AsyncMock(return_value={"sent": True, "message_id": 2}),
+        ) as mock_send_t1:
+            # 2. Resend after 1 hour (T1 = T0 + 1h, within 4h cooldown): must be omitted by cooldown
+            t1_utc = t0_utc + timedelta(hours=1)
+            t1_cba = t0_cba + timedelta(hours=1)
 
-        res1 = await process_and_dispatch_alerts(
-            detected_alerts=[alert_base],
-            city_key="rio_cuarto",
-            alert_settings=alert_settings,
-            custom_db_path=db_path,
-            now_utc=t1_utc,
-            now_cordoba=t1_cba,
-        )
-        assert res1["sent_count"] == 0
-        assert res1["omitted_count"] == 1
-        assert res1["omitted"][0]["reason"] == "cooldown"
-        mock_send_t1.assert_not_called()
+            res1 = await process_and_dispatch_alerts(
+                detected_alerts=[alert_base],
+                city_key="rio_cuarto",
+                alert_settings=alert_settings,
+                custom_db_path=db_path,
+                now_utc=t1_utc,
+                now_cordoba=t1_cba,
+            )
+            assert res1["sent_count"] == 0
+            assert res1["omitted_count"] == 1
+            assert res1["omitted"][0]["reason"] == "cooldown"
+            mock_send_t1.assert_not_called()
 
-    with patch(
-        "backend.app.services.alerts_service.send_telegram_alert",
-        new=AsyncMock(return_value={"sent": True, "message_id": 3}),
-    ) as mock_send_t2:
-        # 3. Severity escalates to NARANJA after 1.5 hours: BYPASSES cooldown!
-        t2_utc = t0_utc + timedelta(hours=1, minutes=30)
-        t2_cba = t0_cba + timedelta(hours=1, minutes=30)
+        with patch(
+            "backend.app.services.alerts_service.send_telegram_alert",
+            new=AsyncMock(return_value={"sent": True, "message_id": 3}),
+        ) as mock_send_t2:
+            # 3. Severity escalates to NARANJA after 1.5 hours: BYPASSES cooldown!
+            t2_utc = t0_utc + timedelta(hours=1, minutes=30)
+            t2_cba = t0_cba + timedelta(hours=1, minutes=30)
 
-        alert_escalated = {
-            "priority": 1,
-            "level": "naranja",
-            "type": "viento_fuerte",
-            "alert_key": "wind:rafagas_fuertes",
-            "title": "Alerta por viento extremo",
-            "description": "Ráfagas aumentaron a 85 km/h.",
-        }
+            alert_escalated = {
+                "priority": 1,
+                "level": "naranja",
+                "type": "viento_fuerte",
+                "alert_key": "wind:rafagas_fuertes",
+                "title": "Alerta por viento extremo",
+                "description": "Ráfagas aumentaron a 85 km/h.",
+            }
 
-        res2 = await process_and_dispatch_alerts(
-            detected_alerts=[alert_escalated],
-            city_key="rio_cuarto",
-            alert_settings=alert_settings,
-            custom_db_path=db_path,
-            now_utc=t2_utc,
-            now_cordoba=t2_cba,
-        )
-        assert res2["sent_count"] == 1
-        assert res2["omitted_count"] == 0
-        mock_send_t2.assert_called_once()
+            res2 = await process_and_dispatch_alerts(
+                detected_alerts=[alert_escalated],
+                city_key="rio_cuarto",
+                alert_settings=alert_settings,
+                custom_db_path=db_path,
+                now_utc=t2_utc,
+                now_cordoba=t2_cba,
+            )
+            assert res2["sent_count"] == 1
+            assert res2["omitted_count"] == 0
+            mock_send_t2.assert_called_once()
 
-        st2 = get_alert_state("rio_cuarto", "wind:rafagas_fuertes", custom_path=db_path)
-        assert st2["last_severity"] == "naranja"
+            st2 = get_alert_state("rio_cuarto", "wind:rafagas_fuertes", custom_path=db_path)
+            assert st2["last_severity"] == "naranja"
 
-    with patch(
-        "backend.app.services.alerts_service.send_telegram_alert",
-        new=AsyncMock(return_value={"sent": True, "message_id": 4}),
-    ) as mock_send_t3:
-        # 4. After 5 hours (T3 = T2 + 5h > 4h cooldown): sends normally again
-        t3_utc = t2_utc + timedelta(hours=5)
-        t3_cba = t2_cba + timedelta(hours=5)
+        with patch(
+            "backend.app.services.alerts_service.send_telegram_alert",
+            new=AsyncMock(return_value={"sent": True, "message_id": 4}),
+        ) as mock_send_t3:
+            # 4. After 5 hours (T3 = T2 + 5h > 4h cooldown): sends normally again
+            t3_utc = t2_utc + timedelta(hours=5)
+            t3_cba = t2_cba + timedelta(hours=5)
 
-        res3 = await process_and_dispatch_alerts(
-            detected_alerts=[alert_escalated],
-            city_key="rio_cuarto",
-            alert_settings=alert_settings,
-            custom_db_path=db_path,
-            now_utc=t3_utc,
-            now_cordoba=t3_cba,
-        )
-        assert res3["sent_count"] == 1
-        assert res3["omitted_count"] == 0
-        mock_send_t3.assert_called_once()
+            res3 = await process_and_dispatch_alerts(
+                detected_alerts=[alert_escalated],
+                city_key="rio_cuarto",
+                alert_settings=alert_settings,
+                custom_db_path=db_path,
+                now_utc=t3_utc,
+                now_cordoba=t3_cba,
+            )
+            assert res3["sent_count"] == 1
+            assert res3["omitted_count"] == 0
+            mock_send_t3.assert_called_once()
+
+    asyncio.run(_run())
 
 
 def test_security_cron_secret(monkeypatch):
@@ -391,11 +398,10 @@ def test_security_never_leak_telegram_credentials(monkeypatch):
     assert "chat_id" not in data
 
 
-@pytest.mark.asyncio
-async def test_telegram_service_unconfigured_graceful(monkeypatch):
+def test_telegram_service_unconfigured_graceful(monkeypatch):
     """If Telegram credentials are not set, send_telegram_alert returns gracefully without exceptions."""
     monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "")
     monkeypatch.setattr(settings, "TELEGRAM_CHAT_ID", "")
 
-    result = await send_telegram_alert("<b>Test message</b>")
+    result = asyncio.run(send_telegram_alert("<b>Test message</b>"))
     assert result == {"sent": False, "reason": "telegram_not_configured"}
