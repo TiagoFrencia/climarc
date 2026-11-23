@@ -64,6 +64,11 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
             </h2>
             <p className="text-xs text-slate-400">
               Estación {city.icao} · Ensamble multi-modelo
+              {city.name.includes('(GPS)') && (
+                <span className="block text-[10px] text-slate-400/90 font-mono mt-0.5">
+                  Coord: {city.lat.toFixed(3)}, {city.lon.toFixed(3)}
+                </span>
+              )}
             </p>
           </div>
 

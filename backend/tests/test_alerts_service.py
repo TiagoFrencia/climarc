@@ -405,3 +405,67 @@ def test_telegram_service_unconfigured_graceful(monkeypatch):
 
     result = asyncio.run(send_telegram_alert("<b>Test message</b>"))
     assert result == {"sent": False, "reason": "telegram_not_configured"}
+
+
+def test_metar_ts_active_thunderstorm_priority_1(init_clean_db):
+    """
+    Reproduces real-world scenario from 2026-11-23 06:00-07:06 AM:
+    SAOC reports standalone 'TS' (thunderstorm without heavy rain or with CB).
+    Must be detected as Priority 1 ('Tormenta eléctrica activa en aeródromo')
+    and dispatched to Telegram even during quiet hours.
+    """
+    db_path = init_clean_db
+    from backend.app.services.metar_service import extract_wx_codes
+
+    raw_metar = "METAR SAOC 230900Z 02008KT 9999 TS SCT030 FEW045CB 15/14 Q1009"
+    wx_string = "TS"
+
+    # 1. Verify wx_codes extraction with and without wx_string
+    codes = extract_wx_codes(raw_metar, wx_string)
+    assert "TS" in codes
+    codes_raw = extract_wx_codes(raw_metar, None)
+    assert "TS" in codes_raw
+
+    # 2. Evaluate alert conditions
+    metar_obs = {
+        "icao": "SAOC",
+        "raw_metar": raw_metar,
+        "wx_string": wx_string,
+        "wx_codes": codes,
+        "temp_c": 15.0,
+    }
+
+    alerts = evaluate_alert_conditions(
+        city_key="rio_cuarto",
+        metar_obs=metar_obs,
+    )
+
+    ts_alerts = [a for a in alerts if a.get("alert_key") == "metar:tormenta"]
+    assert len(ts_alerts) == 1
+    alert = ts_alerts[0]
+    assert alert["priority"] == 1
+    assert alert["level"] in ("amarillo", "naranja")
+    assert alert["type"] == "tormenta"
+    assert "Tormenta eléctrica activa" in alert["title"]
+
+    # 3. Process and dispatch during quiet hours (must NOT be omitted)
+    now_cordoba_quiet = datetime(2026, 11, 23, 6, 15, tzinfo=CORDOBA_TZ)
+    now_utc = datetime(2026, 11, 23, 9, 15, tzinfo=timezone.utc)
+
+    mock_send = AsyncMock(return_value={"sent": True, "message_id": 999})
+    with patch("backend.app.services.alerts_service.send_telegram_alert", mock_send):
+        result = asyncio.run(
+            process_and_dispatch_alerts(
+                detected_alerts=alerts,
+                city_key="rio_cuarto",
+                now_utc=now_utc,
+                now_cordoba=now_cordoba_quiet,
+                custom_db_path=db_path,
+            )
+        )
+
+    assert result["detected_count"] >= 1
+    assert result["sent_count"] >= 1
+    assert result["omitted_count"] == 0
+    sent_keys = [s["alert_key"] for s in result["sent"]]
+    assert "metar:tormenta" in sent_keys

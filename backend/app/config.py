@@ -1,6 +1,8 @@
 import os
 import json
+import math
 from typing import Dict, Any, List, Optional, Union
+import httpx
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -122,22 +124,115 @@ def get_city_config(city_key: Optional[str] = None, lat: Optional[float] = None,
         return PRECONFIGURED_CITIES[city_key]
 
     if lat is not None and lon is not None:
-        # Calculate squared distance to known cities
-        best_city = "rio_cuarto"
-        best_dist = float("inf")
-        for key, c in PRECONFIGURED_CITIES.items():
-            dist = (c.lat - lat) ** 2 + (c.lon - lon) ** 2
-            if dist < best_dist:
-                best_dist = dist
-                best_city = key
-        # Return city config matching target coordinates with closest airport
+        rc_dist_km = math.sqrt(((lat - (-33.1232)) * 111.0) ** 2 + ((lon - (-64.3493)) * 93.0) ** 2)
+        cba_dist_km = math.sqrt(((lat - (-31.3155)) * 111.0) ** 2 + ((lon - (-64.2133)) * 93.0) ** 2)
+
+        if rc_dist_km < 15.0:
+            return CityConfig(
+                key="rio_cuarto",
+                name="Río Cuarto (GPS)",
+                lat=lat,
+                lon=lon,
+                icao="SAOC",
+            )
+        elif cba_dist_km < 15.0:
+            return CityConfig(
+                key="cordoba",
+                name="Córdoba (GPS)",
+                lat=lat,
+                lon=lon,
+                icao="SACO",
+            )
+
+        best_city = "rio_cuarto" if rc_dist_km < cba_dist_km else "cordoba"
         matched = PRECONFIGURED_CITIES[best_city]
         return CityConfig(
             key=best_city,
-            name=f"Ubicación ({lat:.3f}, {lon:.3f})",
+            name="Mi ubicación (GPS)",
             lat=lat,
             lon=lon,
             icao=matched.icao,
+        )
+
+    return PRECONFIGURED_CITIES["rio_cuarto"]
+
+
+async def resolve_city_config(
+    city_key: Optional[str] = None,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    client: Optional[httpx.AsyncClient] = None,
+) -> CityConfig:
+    """
+    Asynchronously resolves city configuration.
+    If GPS coordinates are provided:
+    - Within 15 km of Río Cuarto -> 'Río Cuarto (GPS)'
+    - Within 15 km of Córdoba -> 'Córdoba (GPS)'
+    - Further away -> Queries BigDataCloud reverse geocode client (timeout 2.5s)
+      with fallback to 'Mi ubicación (GPS)'.
+    """
+    if city_key and city_key in PRECONFIGURED_CITIES:
+        return PRECONFIGURED_CITIES[city_key]
+
+    if lat is not None and lon is not None:
+        rc_dist_km = math.sqrt(((lat - (-33.1232)) * 111.0) ** 2 + ((lon - (-64.3493)) * 93.0) ** 2)
+        cba_dist_km = math.sqrt(((lat - (-31.3155)) * 111.0) ** 2 + ((lon - (-64.2133)) * 93.0) ** 2)
+
+        if rc_dist_km < 15.0:
+            return CityConfig(
+                key="rio_cuarto",
+                name="Río Cuarto (GPS)",
+                lat=lat,
+                lon=lon,
+                icao="SAOC",
+            )
+        elif cba_dist_km < 15.0:
+            return CityConfig(
+                key="cordoba",
+                name="Córdoba (GPS)",
+                lat=lat,
+                lon=lon,
+                icao="SACO",
+            )
+
+        closest_key = "rio_cuarto" if rc_dist_km < cba_dist_km else "cordoba"
+        closest_icao = "SAOC" if rc_dist_km < cba_dist_km else "SACO"
+
+        # Reverse geocoding lookup
+        url = f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat}&longitude={lon}&localityLanguage=es"
+        try:
+            close_client = False
+            req_client = client
+            if req_client is None:
+                req_client = httpx.AsyncClient(timeout=2.5)
+                close_client = True
+            try:
+                resp = await req_client.get(url, follow_redirects=True, timeout=2.5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    locality = data.get("locality") or data.get("city")
+                    if locality:
+                        if locality.startswith("Departamento "):
+                            locality = locality.replace("Departamento ", "")
+                        return CityConfig(
+                            key=closest_key,
+                            name=f"{locality} (GPS)",
+                            lat=lat,
+                            lon=lon,
+                            icao=closest_icao,
+                        )
+            finally:
+                if close_client:
+                    await req_client.aclose()
+        except Exception:
+            pass
+
+        return CityConfig(
+            key=closest_key,
+            name="Mi ubicación (GPS)",
+            lat=lat,
+            lon=lon,
+            icao=closest_icao,
         )
 
     return PRECONFIGURED_CITIES["rio_cuarto"]

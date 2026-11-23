@@ -375,22 +375,22 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
               {activeLayer === 'radar' ? (
                 <div className="flex items-center justify-between text-[10px] text-slate-400 px-1">
                   <span className="text-slate-300 font-semibold">Reflectividad:</span>
-                  <div className="flex items-center gap-1.5 font-medium">
+                  <div className="flex items-center gap-1.5 font-medium whitespace-nowrap">
                     <span className="flex items-center gap-1">
                       <span className="w-2 h-2 rounded-full bg-cyan-400" />
                       <span>Débil</span>
                     </span>
-                    <span className="text-slate-600">→</span>
+                    <span className="text-slate-600">·</span>
                     <span className="flex items-center gap-1">
                       <span className="w-2 h-2 rounded-full bg-emerald-400" />
                       <span>Mod.</span>
                     </span>
-                    <span className="text-slate-600">→</span>
+                    <span className="text-slate-600">·</span>
                     <span className="flex items-center gap-1">
                       <span className="w-2 h-2 rounded-full bg-amber-400" />
                       <span>Fuerte</span>
                     </span>
-                    <span className="text-slate-600">→</span>
+                    <span className="text-slate-600">·</span>
                     <span className="flex items-center gap-1">
                       <span className="w-2 h-2 rounded-full bg-purple-500" />
                       <span>Granizo</span>
@@ -398,14 +398,32 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
                   </div>
                 </div>
               ) : (
-                <div className="flex items-center justify-between text-[10px] text-slate-400 px-1">
-                  <span className="text-indigo-300 font-semibold flex items-center gap-1">
-                    <Radio className="w-3 h-3 text-indigo-400" />
-                    GOES-19 Band 13 (IR Gradiente)
-                  </span>
-                  <span className="text-slate-300">
-                    Topes nubosos y tormentas en tiempo real
-                  </span>
+                <div className="flex flex-col gap-1 px-1">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-indigo-300 font-semibold flex items-center gap-1">
+                      <Radio className="w-3 h-3 text-indigo-400" />
+                      GOES-19 Band 13 (IR Gradiente)
+                    </span>
+                    <span className="text-slate-400 text-[9px]">Topes nubosos</span>
+                  </div>
+                  {/* Mini color scale for satellite */}
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium whitespace-nowrap">
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-slate-400" />
+                      <span>Nubes</span>
+                    </span>
+                    <span className="text-slate-600">→</span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                      <span>Tormenta</span>
+                    </span>
+                    <span className="text-slate-600">→</span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-rose-500" />
+                      <span className="w-2 h-2 rounded-full bg-purple-500 -ml-0.5" />
+                      <span>Severa / Granizo</span>
+                    </span>
+                  </div>
                 </div>
               )}
             </div>

@@ -126,10 +126,18 @@ def evaluate_alert_conditions(
                 "details": {"temp_c": temp_c, "raw_metar": raw_ob},
             })
 
-        # Active Thunderstorm (TS / TSRA)
-        has_ts = any("TS" in c for c in wx_codes) or " TS" in raw_ob or "TSRA" in raw_ob
+        # Active Thunderstorm (TS / TSRA / VCTS)
+        wx_str_raw = str(metar_obs.get("wx_string") or "").upper()
+        has_ts = (
+            any("TS" in c for c in wx_codes)
+            or "TS" in wx_str_raw
+            or " TS" in raw_ob
+            or "TS " in raw_ob
+            or "TSRA" in raw_ob
+            or "VCTS" in raw_ob
+        )
         if has_ts:
-            is_heavy = "+TSRA" in wx_codes or "+RA" in wx_codes or "+TS" in raw_ob
+            is_heavy = "+TSRA" in wx_codes or "+RA" in wx_codes or "+TS" in raw_ob or "+TS" in wx_str_raw
             alerts.append({
                 "priority": 1,
                 "level": "naranja" if is_heavy else "amarillo",

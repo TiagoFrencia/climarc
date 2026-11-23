@@ -9,7 +9,7 @@ from ..database import save_metar_record, get_metar_history
 
 METAR_URL = "https://aviationweather.gov/api/data/metar"
 WEATHER_CODES_REGEX = re.compile(
-    r"\b(\+|-|VC)?(TS|SH|FZ|BL|DR)?(RA|DZ|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS|DS)\b"
+    r"\b(\+|-|VC)?(?:(TS|SH|FZ|BL|DR)(RA|DZ|SN|SG|IC|PL|GR|GS|UP)?|(RA|DZ|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS|DS))\b"
 )
 
 

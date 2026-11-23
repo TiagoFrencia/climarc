@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import httpx
 
-from .config import settings, get_city_config, PRECONFIGURED_CITIES
+from .config import settings, get_city_config, resolve_city_config, PRECONFIGURED_CITIES
 from .database import (
     init_db,
     get_cached_payload,
@@ -34,11 +34,29 @@ RAINVIEWER_MAPS_URL = "https://api.rainviewer.com/public/weather-maps.json"
 REALEARTH_TIMES_URL = "https://realearth.ssec.wisc.edu/api/times?products=G19-ABI-FD-BAND13-GRAD"
 
 
+async def periodic_alerts_checker():
+    """Background task inside FastAPI that checks and dispatches alerts every 15 minutes when container is awake."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            logger.info("Ejecutando chequeo periódico interno de alertas...")
+            await check_and_dispatch_cron(city_key="rio_cuarto")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Error en chequeo periódico interno de alertas: {e}")
+        await asyncio.sleep(900)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize SQLite schema
     init_db()
-    yield
+    task = asyncio.create_task(periodic_alerts_checker())
+    try:
+        yield
+    finally:
+        task.cancel()
 
 
 app = FastAPI(
@@ -127,7 +145,7 @@ async def get_weather(
     - Fuses forecasts with Nowcast blending and Confidence Index.
     - Evaluates local severe weather alerts.
     """
-    city_cfg = get_city_config(city_key=city, lat=lat, lon=lon)
+    city_cfg = await resolve_city_config(city_key=city, lat=lat, lon=lon)
 
     cache_key = f"weather:{city_cfg.key}" if (lat is None or lon is None) else f"weather:{lat:.4f}:{lon:.4f}"
 
