@@ -3,6 +3,9 @@ import type {
   RadarResponse,
   AccuracyResponse,
   HealthResponse,
+  AlertSettingsResponse,
+  AlertThresholdSettings,
+  AlertTestResponse,
 } from '../types/weather';
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
@@ -58,4 +61,44 @@ export async function fetchHealth(): Promise<HealthResponse> {
   const targetUrl = API_BASE_URL ? `${API_BASE_URL}/api/health` : '/api/health';
   const res = await fetch(targetUrl);
   return handleResponse<HealthResponse>(res);
+}
+
+export async function fetchAlertSettings(): Promise<AlertSettingsResponse> {
+  const targetUrl = API_BASE_URL ? `${API_BASE_URL}/api/alerts/settings` : '/api/alerts/settings';
+  const res = await fetch(targetUrl);
+  return handleResponse<AlertSettingsResponse>(res);
+}
+
+export async function saveAlertSettings(
+  settings: Partial<AlertThresholdSettings>,
+  adminPin?: string
+): Promise<{ status: string; settings: AlertThresholdSettings; message?: string }> {
+  const targetUrl = API_BASE_URL ? `${API_BASE_URL}/api/alerts/settings` : '/api/alerts/settings';
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (adminPin && adminPin.trim()) {
+    headers['X-ADMIN-PIN'] = adminPin.trim();
+  }
+
+  const res = await fetch(targetUrl, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(settings),
+  });
+  return handleResponse<{ status: string; settings: AlertThresholdSettings; message?: string }>(res);
+}
+
+export async function testTelegramAlert(adminPin?: string): Promise<AlertTestResponse> {
+  const targetUrl = API_BASE_URL ? `${API_BASE_URL}/api/alerts/test` : '/api/alerts/test';
+  const headers: Record<string, string> = {};
+  if (adminPin && adminPin.trim()) {
+    headers['X-ADMIN-PIN'] = adminPin.trim();
+  }
+
+  const res = await fetch(targetUrl, {
+    method: 'POST',
+    headers,
+  });
+  return handleResponse<AlertTestResponse>(res);
 }

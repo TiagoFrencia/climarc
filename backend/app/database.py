@@ -61,11 +61,42 @@ def init_db(custom_path: Optional[str] = None) -> None:
                     alert_key TEXT NOT NULL,
                     level TEXT NOT NULL,
                     active INTEGER NOT NULL DEFAULT 1,
+                    updated_at_utc TEXT NOT NULL,
+                    last_severity TEXT,
+                    last_sent_utc TEXT,
+                    payload_summary TEXT
+                )
+            """)
+            # Migration check: Ensure new columns exist if table was created in an earlier phase
+            cur = conn.execute("PRAGMA table_info(alert_state)")
+            existing_cols = [r["name"] for r in cur.fetchall()]
+            if "last_severity" not in existing_cols:
+                conn.execute("ALTER TABLE alert_state ADD COLUMN last_severity TEXT")
+            if "last_sent_utc" not in existing_cols:
+                conn.execute("ALTER TABLE alert_state ADD COLUMN last_sent_utc TEXT")
+            if "payload_summary" not in existing_cols:
+                conn.execute("ALTER TABLE alert_state ADD COLUMN payload_summary TEXT")
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS alert_settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    rain_prob_pct REAL NOT NULL,
+                    rain_mm REAL NOT NULL,
+                    wrf_nearby_mm REAL NOT NULL,
+                    gust_kmh REAL NOT NULL,
+                    temp_drop_c REAL NOT NULL,
+                    cold_apparent_c REAL NOT NULL,
+                    cape_jkg REAL NOT NULL,
+                    cooldown_hours REAL NOT NULL,
+                    quiet_enabled INTEGER NOT NULL DEFAULT 0,
+                    quiet_start_hour INTEGER NOT NULL DEFAULT 23,
+                    quiet_end_hour INTEGER NOT NULL DEFAULT 7,
                     updated_at_utc TEXT NOT NULL
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_metar_icao_time ON metar_history(icao, obs_time_utc)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_city_target ON forecast_snapshots(city, target_time_utc)")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_state_city_key ON alert_state(city, alert_key)")
     finally:
         conn.close()
 
@@ -271,5 +302,208 @@ def calculate_accuracy_metrics(
             "mae_wind_kmh": mae_wind,
             "status": "ok",
         }
+    finally:
+        conn.close()
+
+
+def get_alert_settings(custom_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Retrieves alert thresholds and quiet hours from SQLite.
+    If no record exists (e.g. after ephemeral disk restart), falls back to settings (.env defaults).
+    """
+    conn = get_connection(custom_path)
+    try:
+        cur = conn.execute("""
+            SELECT
+                rain_prob_pct, rain_mm, wrf_nearby_mm, gust_kmh,
+                temp_drop_c, cold_apparent_c, cape_jkg, cooldown_hours,
+                quiet_enabled, quiet_start_hour, quiet_end_hour, updated_at_utc
+            FROM alert_settings
+            WHERE id = 1
+        """)
+        row = cur.fetchone()
+        if not row:
+            return {
+                "rain_prob_pct": float(settings.ALERT_RAIN_PROB_PCT),
+                "rain_mm": float(settings.ALERT_RAIN_MM),
+                "wrf_nearby_mm": float(settings.ALERT_WRF_NEARBY_MM),
+                "gust_kmh": float(settings.ALERT_GUST_KMH),
+                "temp_drop_c": float(settings.ALERT_TEMP_DROP_C),
+                "cold_apparent_c": float(settings.ALERT_COLD_APPARENT_C),
+                "cape_jkg": float(settings.ALERT_CAPE_JKG),
+                "cooldown_hours": float(settings.ALERT_COOLDOWN_HOURS),
+                "quiet_enabled": bool(settings.ALERT_QUIET_ENABLED),
+                "quiet_start_hour": int(settings.ALERT_QUIET_START_HOUR),
+                "quiet_end_hour": int(settings.ALERT_QUIET_END_HOUR),
+                "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        return {
+            "rain_prob_pct": float(row["rain_prob_pct"]),
+            "rain_mm": float(row["rain_mm"]),
+            "wrf_nearby_mm": float(row["wrf_nearby_mm"]),
+            "gust_kmh": float(row["gust_kmh"]),
+            "temp_drop_c": float(row["temp_drop_c"]),
+            "cold_apparent_c": float(row["cold_apparent_c"]),
+            "cape_jkg": float(row["cape_jkg"]),
+            "cooldown_hours": float(row["cooldown_hours"]),
+            "quiet_enabled": bool(row["quiet_enabled"]),
+            "quiet_start_hour": int(row["quiet_start_hour"]),
+            "quiet_end_hour": int(row["quiet_end_hour"]),
+            "updated_at_utc": row["updated_at_utc"],
+        }
+    finally:
+        conn.close()
+
+
+def update_alert_settings(new_values: Dict[str, Any], custom_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Saves or updates custom thresholds and quiet hours in SQLite.
+    Merges unspecified values from current settings.
+    """
+    current = get_alert_settings(custom_path)
+    merged = {**current, **{k: v for k, v in new_values.items() if v is not None}}
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    merged["updated_at_utc"] = now_utc
+
+    conn = get_connection(custom_path)
+    try:
+        with conn:
+            conn.execute("""
+                INSERT INTO alert_settings (
+                    id, rain_prob_pct, rain_mm, wrf_nearby_mm, gust_kmh,
+                    temp_drop_c, cold_apparent_c, cape_jkg, cooldown_hours,
+                    quiet_enabled, quiet_start_hour, quiet_end_hour, updated_at_utc
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    rain_prob_pct = excluded.rain_prob_pct,
+                    rain_mm = excluded.rain_mm,
+                    wrf_nearby_mm = excluded.wrf_nearby_mm,
+                    gust_kmh = excluded.gust_kmh,
+                    temp_drop_c = excluded.temp_drop_c,
+                    cold_apparent_c = excluded.cold_apparent_c,
+                    cape_jkg = excluded.cape_jkg,
+                    cooldown_hours = excluded.cooldown_hours,
+                    quiet_enabled = excluded.quiet_enabled,
+                    quiet_start_hour = excluded.quiet_start_hour,
+                    quiet_end_hour = excluded.quiet_end_hour,
+                    updated_at_utc = excluded.updated_at_utc
+            """, (
+                float(merged["rain_prob_pct"]),
+                float(merged["rain_mm"]),
+                float(merged["wrf_nearby_mm"]),
+                float(merged["gust_kmh"]),
+                float(merged["temp_drop_c"]),
+                float(merged["cold_apparent_c"]),
+                float(merged["cape_jkg"]),
+                float(merged["cooldown_hours"]),
+                1 if merged["quiet_enabled"] else 0,
+                int(merged["quiet_start_hour"]),
+                int(merged["quiet_end_hour"]),
+                now_utc,
+            ))
+        return merged
+    finally:
+        conn.close()
+
+
+def get_alert_state(city: str, alert_key: str, custom_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Retrieves the last recorded state of an alert key for anti-spam cooldown evaluation.
+    """
+    conn = get_connection(custom_path)
+    try:
+        cur = conn.execute("""
+            SELECT city, alert_key, level, active, updated_at_utc, last_severity, last_sent_utc, payload_summary
+            FROM alert_state
+            WHERE city = ? AND alert_key = ?
+        """, (city, alert_key))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "city": row["city"],
+            "alert_key": row["alert_key"],
+            "last_severity": row["last_severity"] or row["level"],
+            "last_sent_utc": row["last_sent_utc"] or row["updated_at_utc"],
+            "payload_summary": row["payload_summary"] or "",
+            "active": row["active"],
+        }
+    finally:
+        conn.close()
+
+
+def set_alert_state(
+    city: str,
+    alert_key: str,
+    last_severity: str,
+    payload_summary: str,
+    last_sent_utc: Optional[str] = None,
+    active: int = 1,
+    custom_path: Optional[str] = None
+) -> None:
+    """
+    Records or updates an alert state in SQLite after dispatching.
+    """
+    conn = get_connection(custom_path)
+    now_utc = last_sent_utc or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with conn:
+            conn.execute("""
+                INSERT INTO alert_state (
+                    city, alert_key, level, active, updated_at_utc,
+                    last_severity, last_sent_utc, payload_summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(city, alert_key) DO UPDATE SET
+                    level = excluded.level,
+                    active = excluded.active,
+                    updated_at_utc = excluded.updated_at_utc,
+                    last_severity = excluded.last_severity,
+                    last_sent_utc = excluded.last_sent_utc,
+                    payload_summary = excluded.payload_summary
+            """, (
+                city,
+                alert_key,
+                last_severity,
+                active,
+                now_utc,
+                last_severity,
+                now_utc,
+                payload_summary,
+            ))
+    finally:
+        conn.close()
+
+
+def get_recent_alerts(city: Optional[str] = None, limit: int = 10, custom_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Returns recent alerts sent or tracked in SQLite.
+    """
+    conn = get_connection(custom_path)
+    try:
+        query = """
+            SELECT city, alert_key, COALESCE(last_severity, level) as severity,
+                   COALESCE(last_sent_utc, updated_at_utc) as last_sent_utc,
+                   payload_summary
+            FROM alert_state
+        """
+        params = []
+        if city:
+            query += " WHERE city = ?"
+            params.append(city)
+        query += " ORDER BY COALESCE(last_sent_utc, updated_at_utc) DESC LIMIT ?"
+        params.append(limit)
+
+        cur = conn.execute(query, tuple(params))
+        rows = cur.fetchall()
+        return [
+            {
+                "city": r["city"],
+                "alert_key": r["alert_key"],
+                "severity": r["severity"],
+                "last_sent_utc": r["last_sent_utc"],
+                "payload_summary": r["payload_summary"] or "",
+            }
+            for r in rows
+        ]
     finally:
         conn.close()

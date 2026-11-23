@@ -57,8 +57,27 @@ class Settings(BaseSettings):
     # SMN API Token (Optional)
     SMN_JWT_TOKEN: Optional[str] = os.getenv("SMN_JWT_TOKEN", "")
 
-    # Security
+    # Security & Admin
     CRON_SECRET: str = os.getenv("CRON_SECRET", "climarc-local-secret-cron-key")
+    ADMIN_PIN: str = os.getenv("ADMIN_PIN", "")
+
+    # Telegram Bot & Proactive Alerts (Fase 5)
+    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "")
+
+    # Alert Threshold Defaults (leíbles desde entorno para sobrevivir reinicios de Render)
+    ALERT_RAIN_PROB_PCT: float = float(os.getenv("ALERT_RAIN_PROB_PCT", "60.0"))
+    ALERT_RAIN_MM: float = float(os.getenv("ALERT_RAIN_MM", "1.5"))
+    ALERT_WRF_NEARBY_MM: float = float(os.getenv("ALERT_WRF_NEARBY_MM", "8.0"))
+    ALERT_GUST_KMH: float = float(os.getenv("ALERT_GUST_KMH", "45.0"))
+    ALERT_TEMP_DROP_C: float = float(os.getenv("ALERT_TEMP_DROP_C", "6.0"))
+    ALERT_COLD_APPARENT_C: float = float(os.getenv("ALERT_COLD_APPARENT_C", "5.0"))
+    ALERT_CAPE_JKG: float = float(os.getenv("ALERT_CAPE_JKG", "1000.0"))
+    ALERT_COOLDOWN_HOURS: float = float(os.getenv("ALERT_COOLDOWN_HOURS", "4.0"))
+    ALERT_QUIET_ENABLED: bool = os.getenv("ALERT_QUIET_ENABLED", "false").lower() in ("true", "1", "yes")
+    ALERT_QUIET_START_HOUR: int = int(os.getenv("ALERT_QUIET_START_HOUR", "23"))
+    ALERT_QUIET_END_HOUR: int = int(os.getenv("ALERT_QUIET_END_HOUR", "7"))
 
     # CORS
     ALLOWED_ORIGINS: List[str] = [

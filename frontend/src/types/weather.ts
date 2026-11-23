@@ -198,3 +198,42 @@ export interface HealthResponse {
     database: HealthSourceDatabase;
   };
 }
+
+export interface AlertThresholdSettings {
+  rain_prob_pct: number;
+  rain_mm: number;
+  wrf_nearby_mm: number;
+  gust_kmh: number;
+  temp_drop_c: number;
+  cold_apparent_c: number;
+  cape_jkg: number;
+  cooldown_hours: number;
+  quiet_enabled: boolean;
+  quiet_start_hour: number;
+  quiet_end_hour: number;
+  updated_at_utc?: string;
+}
+
+export interface RecentAlertRecord {
+  city: string;
+  alert_key: string;
+  severity: string;
+  last_sent_utc: string;
+  payload_summary: string;
+}
+
+export interface AlertSettingsResponse {
+  settings: AlertThresholdSettings;
+  telegram_configured: boolean;
+  recent_alerts: RecentAlertRecord[];
+}
+
+export interface AlertTestResponse {
+  status: 'ok' | 'warning' | string;
+  result: {
+    sent: boolean;
+    reason?: string;
+    detail?: string;
+    message_id?: number;
+  };
+}

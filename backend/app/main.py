@@ -1,9 +1,11 @@
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, Query, HTTPException, Request
+from fastapi import FastAPI, Query, HTTPException, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 import httpx
 
 from .config import settings, get_city_config, PRECONFIGURED_CITIES
@@ -13,6 +15,9 @@ from .database import (
     set_cached_payload,
     get_metar_history,
     calculate_accuracy_metrics,
+    get_alert_settings,
+    update_alert_settings,
+    get_recent_alerts,
 )
 from .services.metar_service import fetch_metar_observations
 from .services.open_meteo_service import fetch_open_meteo_forecast
@@ -20,6 +25,8 @@ from .services.wrf_reader_service import read_wrf_forecast
 from .services.smn_alerts_service import fetch_smn_alerts
 from .services.local_alerts_detector import detect_local_alerts
 from .services.ensemble_engine import generate_ensemble_forecast
+from .services.telegram_service import format_test_message, send_telegram_alert
+from .services.alerts_service import check_and_dispatch_cron
 
 RAINVIEWER_MAPS_URL = "https://api.rainviewer.com/public/weather-maps.json"
 
@@ -228,3 +235,142 @@ async def get_accuracy(
     city_cfg = get_city_config(city_key=city)
     metrics = calculate_accuracy_metrics(city=city_cfg.key, icao=city_cfg.icao)
     return metrics
+
+
+# -------------------------------------------------------------
+# FASE 5: MOTOR DE ALERTAS PROACTIVAS VÍA TELEGRAM BOT
+# -------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
+
+def verify_cron_secret(x_cron_secret: Optional[str] = Header(None, alias="X-CRON-SECRET")) -> bool:
+    """
+    Verifies that the incoming request contains the secret cron authorization header.
+    Returns 401 if missing or mismatched.
+    """
+    expected = settings.CRON_SECRET.strip() if settings.CRON_SECRET else ""
+    if not expected:
+        raise HTTPException(
+            status_code=401,
+            detail="CRON_SECRET no está configurado en el servidor.",
+        )
+    if not x_cron_secret or x_cron_secret.strip() != expected:
+        raise HTTPException(
+            status_code=401,
+            detail="Header X-CRON-SECRET inválido o ausente.",
+        )
+    return True
+
+
+def verify_admin_pin(x_admin_pin: Optional[str] = Header(None, alias="X-ADMIN-PIN")) -> bool:
+    """
+    Verifies the admin PIN for mutating settings or triggering tests.
+    If ADMIN_PIN is empty in local development, allows with a warning log.
+    If ADMIN_PIN is defined, enforces exact match or raises 401.
+    """
+    expected = settings.ADMIN_PIN.strip() if settings.ADMIN_PIN else ""
+    if not expected:
+        logger.warning("ADMIN_PIN no configurado en entorno. Permitido en desarrollo local con advertencia.")
+        return True
+    if not x_admin_pin or x_admin_pin.strip() != expected:
+        raise HTTPException(
+            status_code=401,
+            detail="PIN de administrador inválido o no proporcionado (X-ADMIN-PIN).",
+        )
+    return True
+
+
+class AlertSettingsUpdate(BaseModel):
+    rain_prob_pct: Optional[float] = Field(None, ge=0.0, le=100.0)
+    rain_mm: Optional[float] = Field(None, ge=0.0)
+    wrf_nearby_mm: Optional[float] = Field(None, ge=0.0)
+    gust_kmh: Optional[float] = Field(None, ge=0.0)
+    temp_drop_c: Optional[float] = Field(None, ge=0.0)
+    cold_apparent_c: Optional[float] = None
+    cape_jkg: Optional[float] = Field(None, ge=0.0)
+    cooldown_hours: Optional[float] = Field(None, ge=0.1, le=72.0)
+    quiet_enabled: Optional[bool] = None
+    quiet_start_hour: Optional[int] = Field(None, ge=0, le=23)
+    quiet_end_hour: Optional[int] = Field(None, ge=0, le=23)
+
+
+@app.post("/api/alerts/check", dependencies=[Depends(verify_cron_secret)])
+async def check_alerts_cron_endpoint(
+    city: Optional[str] = Query("rio_cuarto", description="City key: rio_cuarto")
+):
+    """
+    Cron trigger for proactive weather alerts evaluation.
+    Evaluates Río Cuarto conditions and dispatches to Telegram according to cooldown and quiet rules.
+    Protected strictly by X-CRON-SECRET.
+    """
+    result = await check_and_dispatch_cron(city_key=city or "rio_cuarto")
+    return result
+
+
+@app.get("/api/alerts/settings")
+async def get_alerts_settings_endpoint():
+    """
+    Returns current alert thresholds, quiet hours, recent alerts sent,
+    and a boolean telegram_configured.
+    NEVER exposes TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.
+    """
+    current_settings = get_alert_settings()
+    recent = get_recent_alerts(limit=10)
+    telegram_is_configured = bool(
+        settings.TELEGRAM_BOT_TOKEN
+        and settings.TELEGRAM_BOT_TOKEN.strip()
+        and settings.TELEGRAM_CHAT_ID
+        and settings.TELEGRAM_CHAT_ID.strip()
+    )
+    return {
+        "settings": current_settings,
+        "telegram_configured": telegram_is_configured,
+        "recent_alerts": recent,
+    }
+
+
+@app.put("/api/alerts/settings", dependencies=[Depends(verify_admin_pin)])
+async def update_alerts_settings_endpoint(payload: AlertSettingsUpdate):
+    """
+    Updates alert thresholds and quiet hours in SQLite.
+    Protected strictly by X-ADMIN-PIN header.
+    """
+    updates = payload.model_dump(exclude_unset=True)
+    updated = update_alert_settings(updates)
+    return {
+        "status": "ok",
+        "settings": updated,
+        "message": "Ajustes de alertas actualizados exitosamente.",
+    }
+
+
+@app.post("/api/alerts/test", dependencies=[Depends(verify_admin_pin)])
+async def test_alerts_endpoint():
+    """
+    Sends a real test alert to Telegram with current Río Cuarto readings.
+    Protected strictly by X-ADMIN-PIN header.
+    """
+    async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
+        metar_map = await fetch_metar_observations(station_ids=["SAOC"], client=client)
+        metar_obs = metar_map.get("SAOC")
+
+    current_summary = None
+    if metar_obs:
+        current_summary = {
+            "temperature_c": metar_obs.get("temp_c"),
+            "wind_speed_kmh": metar_obs.get("wind_speed_kmh"),
+            "wind_gust_kmh": metar_obs.get("wind_gust_kmh"),
+            "pressure_hpa": metar_obs.get("qnh_hpa"),
+        }
+
+    test_msg = format_test_message(
+        city_name="Río Cuarto",
+        station_icao="SAOC",
+        current_weather=current_summary,
+    )
+    send_res = await send_telegram_alert(test_msg)
+    return {
+        "status": "ok" if send_res.get("sent") else "warning",
+        "result": send_res,
+    }
