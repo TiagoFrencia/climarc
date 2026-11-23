@@ -28,4 +28,7 @@ htmlcov/
 # Data files (local wrf downloads / cache)
 data/*.nc
 data/*.bin
+*.db
+*.sqlite
+*.sqlite3
 !data/wrf_latest.json
