@@ -22,10 +22,12 @@ interface HeroCurrentProps {
   city: CityConfig;
 }
 
-function getComfortLabel(dewPointC: number): string {
-  if (dewPointC < 10) return 'Seco';
-  if (dewPointC <= 16) return 'Agradable';
-  if (dewPointC <= 20) return 'Húmedo';
+function getComfortLabel(dewPointC: number, rhPct?: number | null): string {
+  if (rhPct !== undefined && rhPct !== null && rhPct >= 90) return 'Húmedo';
+  const roundedDp = Math.round(dewPointC);
+  if (roundedDp < 10) return 'Seco';
+  if (roundedDp < 16) return 'Agradable';
+  if (roundedDp <= 20) return 'Húmedo';
   return 'Pesado';
 }
 
@@ -155,7 +157,7 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
               </div>
               <div className="text-[10px] text-slate-300 leading-tight">
                 {current.dew_point_c !== null && current.dew_point_c !== undefined
-                  ? `Rocío ${Math.round(current.dew_point_c)}° · ${getComfortLabel(current.dew_point_c)}`
+                  ? `Rocío ${Math.round(current.dew_point_c)}° · ${getComfortLabel(current.dew_point_c, current.relative_humidity_pct)}`
                   : 'Punto de rocío'}
               </div>
             </div>

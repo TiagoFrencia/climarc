@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pytest
 from backend.app.services.ensemble_engine import generate_ensemble_forecast
 
@@ -7,7 +7,7 @@ REF_TIME = datetime(2026, 11, 23, 0, 0, 0, tzinfo=timezone.utc)
 
 @pytest.fixture
 def sample_open_meteo():
-    times = [f"2026-11-23T{h:02d}:00:00Z" for h in range(72)]
+    times = [(REF_TIME + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00Z") for h in range(72)]
     hourly = []
     for t in times:
         hourly.append({
@@ -326,3 +326,112 @@ def test_daily_forecast_coherence(sample_open_meteo):
 
     # FIX 4.2: Daily weather code must be normalized to 3 (cloudy) instead of rain icon with 0%
     assert d0["weather_code"] == 3
+
+
+def test_parse_metar_heavy_ts_vs_hail():
+    """WMO 99 is reserved exclusively for GR/GS (Hail), while +TSRA/+TS maps to WMO 96 (Heavy TS)."""
+    from backend.app.services.ensemble_engine import parse_metar_phenomenon
+
+    # 1. Hail (+TSRA GR) -> WMO 99
+    metar_hail = {
+        "raw_metar": "METAR SAOC 231300Z 18025KT 4000 +TSRA GR BKN015CB 16/15 Q1008",
+        "wx_string": "+TSRA GR",
+        "wx_codes": ["+TSRA", "GR"],
+    }
+    w_code, wx_raw, is_p = parse_metar_phenomenon(metar_hail)
+    assert w_code == 99
+    assert is_p is True
+
+    # 2. Heavy Thunderstorm (+TSRA without hail) -> WMO 96
+    metar_heavy_ts = {
+        "raw_metar": "METAR SAOC 231300Z 18025KT 4000 +TSRA BKN015CB 16/15 Q1008",
+        "wx_string": "+TSRA",
+        "wx_codes": ["+TSRA"],
+    }
+    w_code, wx_raw, is_p = parse_metar_phenomenon(metar_heavy_ts)
+    assert w_code == 96
+    assert is_p is True
+
+    # 3. Standard Thunderstorm (TSRA / TS) -> WMO 95
+    metar_ts = {
+        "raw_metar": "METAR SAOC 230900Z 02008KT 9999 TS SCT030 FEW045CB 15/14 Q1009",
+        "wx_string": "TS",
+        "wx_codes": ["TS"],
+    }
+    w_code, wx_raw, is_p = parse_metar_phenomenon(metar_ts)
+    assert w_code == 95
+
+
+def test_precip_probability_cap_when_zero_mm(sample_open_meteo):
+    """When all active models predict < 0.1 mm and WRF nearby < 0.5 mm, precip_prob_pct is capped at 35%."""
+    # Step 19: All models predict 0.0 mm but high probabilities (87%, 69%, 65%)
+    h19 = sample_open_meteo["hourly"][19]
+    h19["models"]["ecmwf_ifs025"]["precip_mm"] = 0.0
+    h19["models"]["ecmwf_ifs025"]["precip_prob_pct"] = 87.0
+    h19["models"]["icon_seamless"]["precip_mm"] = 0.0
+    h19["models"]["icon_seamless"]["precip_prob_pct"] = 69.0
+    h19["models"]["gfs_seamless"]["precip_mm"] = 0.0
+    h19["models"]["gfs_seamless"]["precip_prob_pct"] = 65.0
+
+    res = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=None,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+
+    step19_out = res["hourly"][19]
+    assert step19_out["precip_mm"] == 0.0
+    assert step19_out["precip_prob_pct"] <= 35.0
+
+
+def test_daily_fused_hourly_integration(sample_open_meteo):
+    """daily[0] and daily[1] min/max must integrate the real fused hourly values instead of raw GFS."""
+    # Initialize all 72 hours to a baseline of 17.0 C
+    for h in sample_open_meteo["hourly"]:
+        for m in ("ecmwf_ifs025", "icon_seamless", "gfs_seamless"):
+            h["models"][m]["temperature_c"] = 17.0
+
+    # Today in Cordoba (UTC-3): indices 3 to 26
+    # Low of 14.0 at index 5 and peak of 19.5 at index 15
+    for m in ("ecmwf_ifs025", "icon_seamless", "gfs_seamless"):
+        sample_open_meteo["hourly"][5]["models"][m]["temperature_c"] = 14.0
+        sample_open_meteo["hourly"][15]["models"][m]["temperature_c"] = 19.5
+
+    # But raw daily block had GFS saying 26.0 C
+    sample_open_meteo["daily"][0]["models"]["gfs_seamless"]["temperature_max_c"] = 26.0
+
+    # Tomorrow in Cordoba (UTC-3): indices 27 to 50
+    # Add day 1 (tomorrow: 2026-11-24) in sample_open_meteo
+    sample_open_meteo["daily"].append({
+        "date": "2026-11-24",
+        "models": {
+            "ecmwf_ifs025": {"temperature_max_c": 30.0, "temperature_min_c": 12.0, "precipitation_sum_mm": 0.0, "precipitation_probability_max_pct": 0.0, "wind_speed_max_kmh": 15.0, "weather_code": 1},
+            "icon_seamless": {"temperature_max_c": 28.0, "temperature_min_c": 11.0, "precipitation_sum_mm": 0.0, "precipitation_probability_max_pct": 0.0, "wind_speed_max_kmh": 15.0, "weather_code": 1},
+            "gfs_seamless": {"temperature_max_c": 32.0, "temperature_min_c": 14.0, "precipitation_sum_mm": 0.0, "precipitation_probability_max_pct": 0.0, "wind_speed_max_kmh": 15.0, "weather_code": 1},
+        },
+    })
+    # Set tomorrow's low of 13.0 at index 28 and peak of 21.0 at index 38
+    for m in ("ecmwf_ifs025", "icon_seamless", "gfs_seamless"):
+        sample_open_meteo["hourly"][28]["models"][m]["temperature_c"] = 13.0
+        sample_open_meteo["hourly"][38]["models"][m]["temperature_c"] = 21.0
+
+    res = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=None,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+
+    d0 = res["daily"][0]
+    d1 = res["daily"][1]
+
+    # Daily[0] max must be 19.5 (from fused hourly) not 26.0 (from GFS)
+    assert d0["temperature_max_c"] == 19.5
+    # Daily[1] max must be 21.0 and min 13.0 (from tomorrow's fused hourly)
+    assert d1["temperature_max_c"] == 21.0
+    assert d1["temperature_min_c"] == 13.0

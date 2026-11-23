@@ -1,6 +1,6 @@
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 
 from ..database import save_forecast_snapshots
@@ -52,7 +52,8 @@ def calculate_apparent_temperature(temp_c: float, rh_pct: Optional[float], wind_
 def parse_metar_phenomenon(metar_data: Optional[Dict[str, Any]]) -> Tuple[Optional[int], Optional[str], bool]:
     """
     Parses METAR weather phenomenon string/codes and maps to WMO weather code:
-      - GR / GS / +TSRA -> WMO 99 (Tormenta fuerte / Granizo)
+      - GR / GS -> WMO 99 (Tormenta con granizo — reservado exclusivamente para granizo real)
+      - +TSRA / +TS -> WMO 96 (Tormenta fuerte)
       - TS / TSRA / VCTS -> WMO 95 (Tormenta eléctrica)
       - +RA / +SHRA -> WMO 65 (Lluvia fuerte)
       - RA / SHRA -> WMO 63 (Lluvia / Chaparrones)
@@ -77,9 +78,9 @@ def parse_metar_phenomenon(metar_data: Optional[Dict[str, Any]]) -> Tuple[Option
             if clean:
                 tokens.add(clean)
 
-    raw = metar_data.get("raw_metar") or ""
+    raw = (metar_data.get("raw_metar") or "").upper()
     found = re.findall(
-        r"\b(\+|-|VC)?(TS|SH|FZ|BL|DR)?(RA|DZ|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS|DS)\b",
+        r"\b(\+|-|VC)?(?:(TS|SH|FZ|BL|DR)(RA|DZ|SN|SG|IC|PL|GR|GS|UP)?|(RA|DZ|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS|DS))\b",
         raw,
     )
     for m in found:
@@ -96,13 +97,31 @@ def parse_metar_phenomenon(metar_data: Optional[Dict[str, Any]]) -> Tuple[Option
     precip_patterns = ("RA", "DZ", "TSRA", "SHRA", "GR", "GS", "SN", "SG", "PL")
     is_precip = any(any(p in t for p in precip_patterns) for t in tokens)
 
-    # WMO hierarchy
+    # WMO hierarchy:
+    # WMO 99: Tormenta con granizo (EXCLUSIVAMENTE si contiene GR o GS)
+    has_hail = (
+        any("GR" in t or "GS" in t for t in tokens)
+        or bool(re.search(r"\b(GR|GS|TSGR|\+TSGR)\b", raw))
+    )
+    # WMO 96: Tormenta fuerte (+TSRA / +TS sin granizo)
+    has_heavy_ts = (
+        any(t in ("+TSRA", "+TS") or "+TS" in t for t in tokens)
+        or bool(re.search(r"\b\+TS(RA)?\b", raw))
+    )
+    # WMO 95: Tormenta eléctrica moderada/estándar
+    has_ts = (
+        any("TS" in t for t in tokens)
+        or bool(re.search(r"\b(TS|TSRA|VCTS|-TSRA|-TS)\b", raw))
+    )
+
     w_code = None
-    if any(t in ("GR", "GS", "+TSRA", "+TSGR", "TSGR") or "GR" in t or "GS" in t for t in tokens):
+    if has_hail:
         w_code = 99
-    elif any(t in ("TS", "TSRA", "-TSRA", "+TS", "VCTS", "VCTSRA") or "TS" in t for t in tokens):
+    elif has_heavy_ts:
+        w_code = 96
+    elif has_ts:
         w_code = 95
-    elif any(t in ("+RA", "+SHRA") for t in tokens):
+    elif any(t in ("+RA", "+SHRA") for t in tokens) or bool(re.search(r"\b\+(RA|SHRA)\b", raw)):
         w_code = 65
     elif any(t in ("RA", "SHRA", "VCRA", "VCSH") for t in tokens):
         w_code = 63
@@ -299,6 +318,17 @@ def generate_ensemble_forecast(
         valid_probs = [p for p in probs if p is not None]
         ens_prob = max(valid_probs) if valid_probs else 0.0
 
+        # Physical coherence: if all active models forecast < 0.1 mm and WRF nearby core < 0.5 mm,
+        # attenuate precip_prob_pct with a maximum cap of 35% (avoid phantom 85%+ rain with 0.0 mm)
+        valid_precip_vals = [v for v in precips.values() if v is not None]
+        max_model_precip = max(valid_precip_vals) if valid_precip_vals else 0.0
+        wrf_nearby_val = wrf_item.get("precip_nearby_max_mm") if wrf_item else 0.0
+        if wrf_nearby_val is None:
+            wrf_nearby_val = 0.0
+
+        if max_model_precip < 0.1 and wrf_nearby_val < 0.5:
+            ens_prob = min(ens_prob, 35.0)
+
         weather_code = m_ecmwf.get("weather_code") or m_icon.get("weather_code") or 0
 
         # Confidence Index calculation
@@ -476,15 +506,38 @@ def generate_ensemble_forecast(
         max_t = round(_weighted_mean(max_temps, daily_weights), 1)
         min_t = round(_weighted_mean(min_temps, daily_weights), 1)
 
-        # FIX 4.1: Para daily[0] (Hoy), asegurar coherencia con current.temperature_c y METAR
-        if d_idx == 0 and blended_hourly:
-            curr_temp = blended_hourly[0]["temperature_c"]
-            min_t = round(min(min_t, curr_temp), 1)
-            max_t = round(max(max_t, curr_temp), 1)
-            if metar_fresh and metar_data and metar_data.get("temp_c") is not None:
-                m_t = float(metar_data["temp_c"])
-                min_t = round(min(min_t, m_t), 1)
-                max_t = round(max(max_t, m_t), 1)
+        # Coherencia de min/max para daily[0] (Hoy) y daily[1] (Mañana) con el ensamble horario fusionado
+        if d_idx in (0, 1) and blended_hourly:
+            matching_hours = []
+            for h in blended_hourly:
+                t_str = h.get("timestamp_utc")
+                if t_str:
+                    try:
+                        dt_h = datetime.fromisoformat(t_str.replace("Z", "+00:00")).astimezone(
+                            timezone(timedelta(hours=-3))
+                        )
+                        if dt_h.strftime("%Y-%m-%d") == d_date:
+                            matching_hours.append(h)
+                    except Exception:
+                        pass
+
+            if matching_hours:
+                h_temps = [h["temperature_c"] for h in matching_hours]
+                max_t = round(max(h_temps), 1)
+                min_t = round(min(h_temps), 1)
+
+            # Para Hoy (daily[0]): coherencia estricta con current.temperature_c y METAR de pista
+            if d_idx == 0:
+                curr_temp = blended_hourly[0]["temperature_c"]
+                min_t = round(min(min_t, curr_temp), 1)
+                max_t = round(max(max_t, curr_temp), 1)
+                if metar_fresh and metar_data and metar_data.get("temp_c") is not None:
+                    try:
+                        m_t = float(metar_data["temp_c"])
+                        min_t = round(min(min_t, m_t), 1)
+                        max_t = round(max(max_t, m_t), 1)
+                    except (ValueError, TypeError):
+                        pass
 
         # FIX 4.2: Normalizar weather_code si precip_prob_pct < 15 y precip_sum_mm < 0.2 y w_code >= 51
         if p_prob < 15 and p_sum < 0.2 and w_code >= 51:

@@ -149,8 +149,8 @@ export const ModelsTransparency: React.FC<ModelsTransparencyProps> = ({
                       <th className="py-2 px-2 text-center">ECMWF</th>
                       <th className="py-2 px-2 text-center">ICON</th>
                       <th className="py-2 px-2 text-center">GFS</th>
-                      <th className="py-2 px-2 text-center text-sky-400 font-bold">
-                        Ensamble+IA
+                      <th className="py-2 px-1.5 text-center text-sky-400 font-bold whitespace-nowrap">
+                        Final+IA
                       </th>
                     </tr>
                   </thead>

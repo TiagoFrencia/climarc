@@ -78,6 +78,10 @@ export function getWeatherCondition(code: number, isDay: boolean = true): Weathe
         iconName: 'cloud-lightning',
       };
     case 96:
+      return {
+        label: 'Tormenta fuerte',
+        iconName: 'cloud-lightning',
+      };
     case 99:
       return {
         label: 'Tormenta con granizo',

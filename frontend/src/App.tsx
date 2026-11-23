@@ -182,7 +182,7 @@ export const App: React.FC = () => {
           ClimaRC · Río Cuarto & Córdoba
         </p>
         <p className="text-[11px]">
-          Ensamble numérico (WRF-SMN 4km, ECMWF, ICON, GFS) + Corrección LightGBM SAOC + Nowcasting Radar RainViewer.
+          Ensamble numérico (WRF-SMN 4km, ECMWF, ICON, GFS) + Corrección LightGBM SAOC + Nowcasting Radar RainViewer y Satélite GOES-19 IR.
         </p>
       </footer>
 
