@@ -105,6 +105,17 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "data/climarc.db")
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+
+    @field_validator("DATABASE_URL", mode="after")
+    @classmethod
+    def normalize_database_url(cls, v: Any) -> str:
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("postgres://"):
+                v = "postgresql://" + v[len("postgres://"):]
+            return v
+        return ""
 
     # Timeouts and User-Agent
     USER_AGENT: str = "ClimaRC-PersonalApp/1.0"

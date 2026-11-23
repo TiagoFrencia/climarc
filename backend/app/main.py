@@ -20,6 +20,8 @@ from .database import (
     get_alert_settings,
     update_alert_settings,
     get_recent_alerts,
+    check_db_health,
+    prune_old_records,
 )
 from .services.metar_service import fetch_metar_observations
 from .services.open_meteo_service import fetch_open_meteo_forecast
@@ -122,10 +124,7 @@ async def health():
                 "jwt_configured": bool(settings.SMN_JWT_TOKEN and settings.SMN_JWT_TOKEN.strip()),
                 "status": "graceful_degradation",
             },
-            "database": {
-                "status": "connected",
-                "path": settings.DATABASE_PATH,
-            },
+            "database": check_db_health(),
         },
     }
 
@@ -384,6 +383,12 @@ async def check_alerts_cron_endpoint(
     Evaluates Río Cuarto conditions and dispatches to Telegram according to cooldown and quiet rules.
     Protected strictly by X-CRON-SECRET.
     """
+    try:
+        prune_res = prune_old_records(days=90)
+        logger.info(f"Retención automática de DB ejecutada: {prune_res}")
+    except Exception as exc:
+        logger.warning(f"Error en retención automática de DB: {exc}")
+
     result = await check_and_dispatch_cron(city_key=city or "rio_cuarto")
     return result
 
