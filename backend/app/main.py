@@ -31,6 +31,7 @@ from .services.local_alerts_detector import detect_local_alerts
 from .services.ensemble_engine import generate_ensemble_forecast, generate_executive_summary
 from .services.sentinel_service import get_sentinels_summary, detect_approaching_front
 from .services.hail_service import evaluate_hail_risk
+from .services.route_service import get_route_weather
 from .services.telegram_service import format_test_message, send_telegram_alert
 from .services.alerts_service import check_and_dispatch_cron
 
@@ -357,6 +358,25 @@ async def get_radar():
         if stale:
             return stale
         raise HTTPException(status_code=503, detail=f"No se pudo consultar el radar de RainViewer: {exc}")
+
+
+@app.get("/api/route-weather")
+async def route_weather(
+    origin: str = Query("rio_cuarto", description="Corridor origin (preset or city key)"),
+    destination: str = Query("cordoba", description="Corridor destination preset (cordoba, villa_maria, villa_mercedes, santa_rosa_calamuchita, san_luis)"),
+    dest_lat: Optional[float] = Query(None, description="Optional custom destination latitude"),
+    dest_lon: Optional[float] = Query(None, description="Optional custom destination longitude"),
+):
+    """
+    Evaluates 3 strategic points along transport routes from Río Cuarto
+    (Origin, Midpoint, Destination) to determine road safety, rain risk, crosswinds and visibility.
+    """
+    return await get_route_weather(
+        origin=origin,
+        destination=destination,
+        dest_lat=dest_lat,
+        dest_lon=dest_lon,
+    )
 
 
 @app.get("/api/accuracy")

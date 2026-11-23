@@ -3,6 +3,7 @@ import { Header } from './components/Header';
 import { AlertsBanner } from './components/AlertsBanner';
 import { HeroCurrent } from './components/HeroCurrent';
 import { HourlyStrip } from './components/HourlyStrip';
+import { MobilityCard } from './components/MobilityCard';
 import { RadarMap } from './components/RadarMap';
 import { DailyForecastList } from './components/DailyForecastList';
 import { ModelsTransparency } from './components/ModelsTransparency';
@@ -12,21 +13,71 @@ import type { WeatherPayload } from './types/weather';
 import { fetchWeather } from './services/api';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 
+interface CachedWeatherEntry {
+  timestamp: number;
+  data: WeatherPayload;
+}
+
+function getStorageKey(cityKey: string, gpsActive: boolean, customCoords: { lat: number; lon: number } | null): string {
+  if (gpsActive && customCoords) {
+    return `climarc_snap_gps_${customCoords.lat.toFixed(2)}_${customCoords.lon.toFixed(2)}`;
+  }
+  return `climarc_snap_${cityKey}`;
+}
+
+function readCachedWeather(key: string): { data: WeatherPayload; ageMinutes: number } | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const entry: CachedWeatherEntry = JSON.parse(raw);
+    const ageMs = Date.now() - entry.timestamp;
+    const maxAgeMs = 6 * 60 * 60 * 1000; // 6 hours
+    if (ageMs > maxAgeMs) return null;
+    const ageMinutes = Math.max(0, Math.round(ageMs / (60 * 1000)));
+    return { data: entry.data, ageMinutes };
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedWeather(key: string, data: WeatherPayload): void {
+  try {
+    const entry: CachedWeatherEntry = {
+      timestamp: Date.now(),
+      data,
+    };
+    localStorage.setItem(key, JSON.stringify(entry));
+  } catch (e) {
+    console.warn('Could not write cache to localStorage:', e);
+  }
+}
+
 export const App: React.FC = () => {
-  const [weatherData, setWeatherData] = useState<WeatherPayload | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
   const [cityKey, setCityKey] = useState<string>('rio_cuarto');
   const [customCoords, setCustomCoords] = useState<{ lat: number; lon: number } | null>(null);
   const [gpsActive, setGpsActive] = useState<boolean>(false);
+
+  // Synchronous read of default city cache on initial mount for 0 ms instant load
+  const initialCache = readCachedWeather('climarc_snap_rio_cuarto');
+  const [weatherData, setWeatherData] = useState<WeatherPayload | null>(() => initialCache?.data || null);
+  const [cachedAge, setCachedAge] = useState<number | null>(() => initialCache?.ageMinutes ?? null);
+  const [isBackgroundRevalidating, setIsBackgroundRevalidating] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(() => !initialCache);
+  const [error, setError] = useState<string | null>(null);
 
   const [isAccuracyOpen, setIsAccuracyOpen] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
 
   const loadForecast = useCallback(
     async (refresh: boolean = false) => {
+      const currentStorageKey = getStorageKey(cityKey, gpsActive, customCoords);
+
       try {
-        setIsLoading(true);
+        if (!weatherData) {
+          setIsLoading(true);
+        } else {
+          setIsBackgroundRevalidating(true);
+        }
         setError(null);
 
         const params: { city?: string; lat?: number; lon?: number; refresh?: boolean } = {
@@ -40,28 +91,46 @@ export const App: React.FC = () => {
           params.city = cityKey;
         }
 
-        const data = await fetchWeather(params);
-        setWeatherData(data);
+        const freshData = await fetchWeather(params);
+        setWeatherData(freshData);
+        writeCachedWeather(currentStorageKey, freshData);
+        setCachedAge(null);
       } catch (err: any) {
         console.error('Failed to load weather:', err);
-        setError(err.message || 'No se pudo conectar con el servidor meteorológico.');
+        // Only display block error if we have no stale data to show
+        if (!weatherData) {
+          setError(err.message || 'No se pudo conectar con el servidor meteorológico.');
+        }
       } finally {
         setIsLoading(false);
+        setIsBackgroundRevalidating(false);
       }
     },
-    [cityKey, gpsActive, customCoords]
+    [cityKey, gpsActive, customCoords, weatherData]
   );
 
   // Initial load and whenever city/GPS changes
   useEffect(() => {
     loadForecast(false);
-  }, [loadForecast]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cityKey, gpsActive, customCoords]);
 
-  // City selection handler
+  // City selection handler with instant cache switch
   const handleSelectCity = (selectedKey: string) => {
     setGpsActive(false);
     setCustomCoords(null);
     setCityKey(selectedKey);
+
+    const snap = readCachedWeather(`climarc_snap_${selectedKey}`);
+    if (snap) {
+      setWeatherData(snap.data);
+      setCachedAge(snap.ageMinutes);
+      setIsLoading(false);
+    } else {
+      setWeatherData(null);
+      setCachedAge(null);
+      setIsLoading(true);
+    }
   };
 
   // GPS navigator geolocation handler
@@ -74,11 +143,19 @@ export const App: React.FC = () => {
     setIsLoading(true);
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        setCustomCoords({
+        const coords = {
           lat: position.coords.latitude,
           lon: position.coords.longitude,
-        });
+        };
+        setCustomCoords(coords);
         setGpsActive(true);
+
+        const snap = readCachedWeather(getStorageKey(cityKey, true, coords));
+        if (snap) {
+          setWeatherData(snap.data);
+          setCachedAge(snap.ageMinutes);
+          setIsLoading(false);
+        }
       },
       (err) => {
         console.warn('Geolocation error:', err);
@@ -100,7 +177,7 @@ export const App: React.FC = () => {
         currentCity={cityKey}
         cityConfig={weatherData?.city}
         currentWeather={weatherData?.current}
-        isLoading={isLoading}
+        isLoading={isLoading || isBackgroundRevalidating}
         onSelectCity={handleSelectCity}
         onUseGps={handleUseGps}
         onRefresh={handleRefresh}
@@ -111,6 +188,18 @@ export const App: React.FC = () => {
 
       {/* Main Content Area */}
       <main className="flex-1 w-full flex flex-col items-center">
+        {/* Instant-Load 0ms SWR Pill */}
+        {cachedAge !== null && isBackgroundRevalidating && (
+          <div className="w-full max-w-md px-4 pt-2">
+            <div className="flex items-center justify-center gap-2 py-1 px-3 rounded-full bg-slate-900/90 border border-sky-500/30 text-[11px] text-sky-300 shadow-md backdrop-blur animate-pulse">
+              <RefreshCw className="w-3 h-3 animate-spin text-sky-400" />
+              <span>
+                Datos de hace {cachedAge === 0 ? 'instantes' : `${cachedAge} min`} · Actualizando en vivo...
+              </span>
+            </div>
+          </div>
+        )}
+
         {error && (
           <div className="p-4 max-w-md w-full">
             <div className="p-4 rounded-2xl bg-rose-950/80 border border-rose-800 text-rose-200 flex items-start gap-3 shadow-lg">
@@ -135,28 +224,39 @@ export const App: React.FC = () => {
             {/* 1. Severe Weather Alerts Banner (top priority) */}
             <AlertsBanner alerts={weatherData.alerts} />
 
-            {/* 2. Hero Card: Current condition, key metrics, AI bias tag */}
+            {/* 2. Hero Card: Current condition, key metrics, executive summary, anti-hail chip */}
             <HeroCurrent
               current={weatherData.current}
               firstHour={weatherData.hourly[0]}
               nextHour={weatherData.hourly[1]}
               city={weatherData.city}
+              summaryOneLiner={weatherData.summary_one_liner}
+              hailRisk={weatherData.hail_risk}
             />
 
-            {/* 3. Hourly Forecast Strip (48h, day/night distinction, WRF 3x3 convective indicator) */}
+            {/* 3. Hourly Forecast Strip (48h Cards or 24h SVG Chart with uncertainty band) */}
             <HourlyStrip hourly={weatherData.hourly} />
 
-            {/* 4. Live RainViewer Radar Map Component */}
+            {/* 4. Mobility Card (Calle / Moto & Chequear Ruta) */}
+            <MobilityCard
+              current={weatherData.current}
+              hourly={weatherData.hourly}
+              city={weatherData.city}
+              sentinels={weatherData.sentinels}
+            />
+
+            {/* 5. Live GOES-19 IR + RainViewer Radar Map Component */}
             <RadarMap
               lat={weatherData.city.lat}
               lon={weatherData.city.lon}
               cityName={weatherData.city.name}
+              sentinels={weatherData.sentinels}
             />
 
-            {/* 5. 7-Day Daily Forecast List */}
+            {/* 6. 7-Day Daily Forecast List */}
             <DailyForecastList daily={weatherData.daily} />
 
-            {/* 6. Multi-Model & ML Bias Transparency Accordion */}
+            {/* 7. Multi-Model & ML Bias Transparency Accordion */}
             <ModelsTransparency
               hourly={weatherData.hourly}
               mlMetadata={weatherData.ml_metadata}
@@ -165,7 +265,7 @@ export const App: React.FC = () => {
           </>
         )}
 
-        {/* Loading Skeleton during initial load */}
+        {/* Loading Skeleton during cold initial load without cache */}
         {isLoading && !weatherData && (
           <div className="flex flex-col items-center justify-center py-24 space-y-3">
             <RefreshCw className="w-8 h-8 text-sky-400 animate-spin" />
@@ -182,7 +282,7 @@ export const App: React.FC = () => {
           ClimaRC · Río Cuarto & Córdoba
         </p>
         <p className="text-[11px]">
-          Ensamble numérico (WRF-SMN 4km, ECMWF, ICON, GFS) + Corrección LightGBM SAOC + Nowcasting Radar RainViewer y Satélite GOES-19 IR.
+          Ensamble numérico (WRF-SMN 4km, ECMWF, ICON, GFS) + Corrección LightGBM SAOC + Nowcasting Radar RainViewer, Satélite GOES-19 IR y Rayos GLM.
         </p>
       </footer>
 
@@ -202,4 +302,3 @@ export const App: React.FC = () => {
 };
 
 export default App;
-

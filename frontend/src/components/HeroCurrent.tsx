@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Wind,
   Droplets,
@@ -6,8 +6,15 @@ import {
   CloudRain,
   Cpu,
   ArrowUp,
+  ShieldAlert,
+  Sparkles,
+  Sun,
+  Sunrise,
+  Sunset,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
-import type { CurrentWeather, HourlyForecast, CityConfig } from '../types/weather';
+import type { CurrentWeather, HourlyForecast, CityConfig, HailRiskEvaluation } from '../types/weather';
 import { WeatherIcon } from './WeatherIcon';
 import {
   getWeatherCondition,
@@ -20,6 +27,8 @@ interface HeroCurrentProps {
   firstHour?: HourlyForecast;
   nextHour?: HourlyForecast;
   city: CityConfig;
+  summaryOneLiner?: string;
+  hailRisk?: HailRiskEvaluation;
 }
 
 function getComfortLabel(dewPointC: number, rhPct?: number | null): string {
@@ -31,12 +40,24 @@ function getComfortLabel(dewPointC: number, rhPct?: number | null): string {
   return 'Pesado';
 }
 
+function getUvBadge(uv: number): { label: string; colorClass: string } {
+  if (uv < 3) return { label: 'Bajo', colorClass: 'text-emerald-400 bg-emerald-950/60 border-emerald-800/60' };
+  if (uv < 6) return { label: 'Moderado', colorClass: 'text-amber-400 bg-amber-950/60 border-amber-800/60' };
+  if (uv < 8) return { label: 'Alto', colorClass: 'text-orange-400 bg-orange-950/60 border-orange-800/60' };
+  if (uv < 11) return { label: 'Muy Alto', colorClass: 'text-rose-400 bg-rose-950/60 border-rose-800/60' };
+  return { label: 'Extremo', colorClass: 'text-purple-400 bg-purple-950/60 border-purple-800/60' };
+}
+
 export const HeroCurrent: React.FC<HeroCurrentProps> = ({
   current,
   firstHour,
   nextHour,
   city,
+  summaryOneLiner,
+  hailRisk,
 }) => {
+  const [isHailExpanded, setIsHailExpanded] = useState<boolean>(false);
+
   const isDay = isDaylightInArgentina(current.timestamp_utc);
   const condition = getWeatherCondition(current.weather_code, isDay);
   const windDirCardinal = degreesToCardinal(current.wind_direction_deg);
@@ -52,11 +73,71 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
   const tempRounded = Math.round(current.temperature_c);
   const appTempRounded = Math.round(current.apparent_temperature_c);
 
+  // Dynamic subtle gradient background based on current condition and local time
+  const code = current.weather_code;
+  const isStorm = code === 95 || code === 96 || code === 99 || Boolean(hailRisk?.imminent_hail_alert);
+  const isRain = code >= 50 && code < 90;
+  const isFogOrOvercast = code === 3 || code === 45 || code === 48;
+
+  let bgGradient = 'from-[#1E293B]/90 via-[#182335]/95 to-[#111827]/98 border-slate-800/90';
+  let glowColor = 'bg-sky-500/10';
+
+  if (isStorm) {
+    bgGradient = 'from-purple-950/70 via-slate-900/90 to-[#0F172A]/98 border-purple-800/60';
+    glowColor = 'bg-purple-600/20';
+  } else if (isRain) {
+    bgGradient = 'from-blue-950/70 via-slate-900/90 to-[#0F172A]/98 border-blue-800/60';
+    glowColor = 'bg-blue-600/15';
+  } else if (isFogOrOvercast) {
+    bgGradient = 'from-slate-800/80 via-slate-900/90 to-[#111827]/98 border-slate-700/60';
+    glowColor = 'bg-slate-500/10';
+  } else if (isDay) {
+    bgGradient = 'from-sky-950/60 via-slate-900/90 to-[#111827]/98 border-sky-800/50';
+    glowColor = 'bg-amber-400/15';
+  } else {
+    bgGradient = 'from-indigo-950/60 via-slate-900/90 to-[#0B1120]/98 border-indigo-900/50';
+    glowColor = 'bg-indigo-500/15';
+  }
+
+  // QNH tendency label & color
+  const qnhTrend = current.qnh_trend;
+  let qnhTrendText = '→ Estable';
+  let qnhTrendColor = 'text-slate-400';
+  if (qnhTrend === 'subiendo') {
+    qnhTrendText = '↗ Subiendo';
+    qnhTrendColor = 'text-emerald-400';
+  } else if (qnhTrend === 'bajando') {
+    qnhTrendText = '↘ Bajando';
+    qnhTrendColor = 'text-amber-400';
+  } else if (qnhTrend === 'bajando_rapido') {
+    qnhTrendText = '⏬ Bajando rápido';
+    qnhTrendColor = 'text-rose-400 font-bold';
+  }
+
+  const qnhDelta = current.qnh_delta_3h_hpa;
+  const qnhDeltaText =
+    qnhDelta !== undefined && qnhDelta !== null && qnhDelta !== 0
+      ? ` (${qnhDelta > 0 ? '+' : ''}${qnhDelta.toFixed(1)} hPa/3h)`
+      : '';
+
+  // Hail Chip logic: only render if level !== 'sin_riesgo'
+  const hasHailRisk = hailRisk && hailRisk.level !== 'sin_riesgo';
+  let hailBadgeClass = 'bg-amber-950/80 border-amber-600/80 text-amber-200';
+  if (hailRisk?.level === 'alto') {
+    hailBadgeClass = 'bg-orange-950/80 border-orange-600/80 text-orange-200';
+  } else if (hailRisk?.level === 'extremo') {
+    hailBadgeClass = 'bg-rose-950/90 border-rose-600/90 text-rose-200 animate-pulse';
+  }
+
+  // UV display condition
+  const uvVal = current.uv_index;
+  const showUv = isDay || (uvVal !== null && uvVal !== undefined && uvVal > 0);
+
   return (
     <section className="px-4 py-2 max-w-md mx-auto w-full">
-      <div className="relative overflow-hidden rounded-3xl bg-gradient-to-b from-[#1E293B]/90 to-[#111827]/95 border border-slate-800/90 shadow-2xl p-5">
+      <div className={`relative overflow-hidden rounded-3xl bg-gradient-to-b ${bgGradient} border shadow-2xl p-5 transition-colors duration-500`}>
         {/* Subtle decorative glow */}
-        <div className="absolute -top-16 -right-16 w-44 h-44 rounded-full bg-sky-500/10 blur-3xl pointer-events-none" />
+        <div className={`absolute -top-16 -right-16 w-44 h-44 rounded-full ${glowColor} blur-3xl pointer-events-none transition-colors duration-500`} />
 
         {/* Location header inside card */}
         <div className="flex items-center justify-between mb-2">
@@ -74,20 +155,82 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
             </p>
           </div>
 
-          {/* AI Correction Badge */}
-          {current.ml_applied && (
-            <div
-              title={`Ajuste LightGBM entrenado con 15.573 hs SAOC: Temp ${current.ml_temp_adjustment_c > 0 ? '+' : ''}${current.ml_temp_adjustment_c} °C, Viento ${current.ml_wind_adjustment_kmh > 0 ? '+' : ''}${current.ml_wind_adjustment_kmh} km/h`}
-              className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-cyan-950/80 border border-cyan-800/70 text-cyan-300 text-[11px] font-semibold shadow-sm"
-            >
-              <Cpu className="w-3 h-3 text-cyan-400" />
-              <span>
-                IA {current.ml_temp_adjustment_c > 0 ? '+' : ''}
-                {current.ml_temp_adjustment_c.toFixed(1)} °C
-              </span>
-            </div>
-          )}
+          <div className="flex items-center gap-1.5">
+            {/* AI Correction Badge */}
+            {current.ml_applied && (
+              <div
+                title={`Ajuste LightGBM entrenado con 15.573 hs SAOC: Temp ${current.ml_temp_adjustment_c > 0 ? '+' : ''}${current.ml_temp_adjustment_c} °C, Viento ${current.ml_wind_adjustment_kmh > 0 ? '+' : ''}${current.ml_wind_adjustment_kmh} km/h`}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-cyan-950/80 border border-cyan-800/70 text-cyan-300 text-[11px] font-semibold shadow-sm"
+              >
+                <Cpu className="w-3 h-3 text-cyan-400" />
+                <span>
+                  IA {current.ml_temp_adjustment_c > 0 ? '+' : ''}
+                  {current.ml_temp_adjustment_c.toFixed(1)} °C
+                </span>
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* Resumen Ejecutivo (1-liner) */}
+        {summaryOneLiner && (
+          <div className="mb-2 py-1.5 px-3 rounded-xl bg-slate-900/70 border border-slate-800/80 text-xs font-medium text-slate-200 leading-snug flex items-center gap-2 shadow-inner">
+            <Sparkles className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+            <span className="truncate">{summaryOneLiner}</span>
+          </div>
+        )}
+
+        {/* Contextual Anti-Hail Chip (Only if hail_risk !== 'sin_riesgo') */}
+        {hasHailRisk && (
+          <div className="mb-3">
+            <button
+              type="button"
+              onClick={() => setIsHailExpanded(!isHailExpanded)}
+              className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl border text-xs font-bold transition-all shadow-sm ${hailBadgeClass}`}
+            >
+              <div className="flex items-center gap-1.5">
+                <ShieldAlert className="w-4 h-4 shrink-0" />
+                <span>Riesgo Granizo: {hailRisk.level.toUpperCase()} ({hailRisk.score.toFixed(0)} pts)</span>
+              </div>
+              <div className="flex items-center gap-1 text-[11px] font-normal opacity-90">
+                <span>{hailRisk.peak_window_local}</span>
+                {isHailExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              </div>
+            </button>
+
+            {/* Expandable Anti-Hail Diagnostic Drawer */}
+            {isHailExpanded && (
+              <div className="mt-2 p-3 rounded-2xl bg-slate-950/90 border border-slate-800 text-[11px] space-y-2 animate-in fade-in duration-200">
+                <div className="grid grid-cols-2 gap-2 text-slate-300">
+                  <div className="p-1.5 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <span className="text-slate-400 block text-[10px]">CAPE Máximo</span>
+                    <span className="font-bold text-slate-100">{hailRisk.cape_max} J/kg</span>
+                  </div>
+                  <div className="p-1.5 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <span className="text-slate-400 block text-[10px]">Cizalladura 0-6 km</span>
+                    <span className="font-bold text-slate-100">{hailRisk.shear_0_6km_kmh} km/h</span>
+                  </div>
+                  <div className="p-1.5 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <span className="text-slate-400 block text-[10px]">Isoterma 0 °C</span>
+                    <span className="font-bold text-slate-100">{hailRisk.freezing_level_m} m</span>
+                  </div>
+                  <div className="p-1.5 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <span className="text-slate-400 block text-[10px]">Tope GOES-19 IR</span>
+                    <span className="font-bold text-slate-100">
+                      {hailRisk.stage2_details?.min_brightness_temp_c !== null &&
+                      hailRisk.stage2_details?.min_brightness_temp_c !== undefined
+                        ? `${hailRisk.stage2_details.min_brightness_temp_c} °C`
+                        : 'Sin núcleos'}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-slate-300 leading-relaxed text-[10.5px] pt-0.5">
+                  {hailRisk.explanation}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Main temperature and weather display */}
         <div className="flex items-center justify-between py-2">
@@ -163,22 +306,23 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
             </div>
           </div>
 
-          {/* Sea Level Pressure QNH */}
+          {/* Sea Level Pressure QNH with Trend and Delta */}
           <div className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800/60">
             <div className="p-2 rounded-lg bg-indigo-950/60 text-indigo-400">
               <Gauge className="w-4 h-4" />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="text-[10px] text-slate-400 uppercase font-medium">
                 Presión QNH
               </div>
-              <div className="font-bold text-slate-200 text-sm">
+              <div className="font-bold text-slate-200 text-sm truncate">
                 {current.pressure_hpa !== null
                   ? `${current.pressure_hpa.toFixed(1)} hPa`
                   : '-- hPa'}
               </div>
-              <div className="text-[10px] text-slate-400">
-                A nivel del mar
+              <div className={`text-[10px] ${qnhTrendColor} truncate`}>
+                {qnhTrendText}
+                {qnhDeltaText}
               </div>
             </div>
           </div>
@@ -216,6 +360,43 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
               </div>
             </div>
           </div>
+        </div>
+
+        {/* Compact Enriched Row: UV + Sunrise + Sunset */}
+        <div className="mt-3 pt-3 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400 px-1">
+          {/* UV (rendered when daytime or > 0) */}
+          {showUv && uvVal !== null && uvVal !== undefined ? (
+            <div className="flex items-center gap-1.5">
+              <Sun className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>
+                UV <span className="font-bold text-slate-200">{uvVal.toFixed(1)}</span>
+              </span>
+              <span className={`px-1.5 py-0.2 rounded text-[10px] font-semibold border ${getUvBadge(uvVal).colorClass}`}>
+                {getUvBadge(uvVal).label}
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1 text-slate-500">
+              <Sun className="w-3.5 h-3.5 text-slate-600" />
+              <span>Noche</span>
+            </div>
+          )}
+
+          {/* Sunrise */}
+          {current.sunrise_local && (
+            <div className="flex items-center gap-1">
+              <Sunrise className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <span>{current.sunrise_local}</span>
+            </div>
+          )}
+
+          {/* Sunset */}
+          {current.sunset_local && (
+            <div className="flex items-center gap-1">
+              <Sunset className="w-3.5 h-3.5 text-indigo-300 shrink-0" />
+              <span>{current.sunset_local}</span>
+            </div>
+          )}
         </div>
       </div>
     </section>

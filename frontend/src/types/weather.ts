@@ -1,6 +1,7 @@
 /**
+/**
  * Type definitions matching 100% of ClimaRC FastAPI Backend JSON responses.
- * Audited against /api/weather, /api/radar, /api/accuracy and /api/health.
+ * Audited against /api/weather, /api/radar, /api/route-weather, /api/accuracy and /api/health.
  */
 
 export interface CityConfig {
@@ -10,6 +11,8 @@ export interface CityConfig {
   lon: number;
   icao: string;
 }
+
+export type QnhTrend = 'subiendo' | 'estable' | 'bajando' | 'bajando_rapido' | null;
 
 export interface CurrentWeather {
   timestamp_utc: string;
@@ -34,6 +37,13 @@ export interface CurrentWeather {
   metar_raw: string;
   metar_wx_raw?: string | null;
   is_precipitating_now?: boolean;
+
+  // Sprint 2.1 & 2.2 enriched metrics
+  qnh_trend?: QnhTrend;
+  qnh_delta_3h_hpa?: number | null;
+  uv_index?: number | null;
+  sunrise_local?: string | null;
+  sunset_local?: string | null;
 }
 
 export interface ModelStepData {
@@ -67,11 +77,13 @@ export interface HourlyForecast {
   ml_wind_adjustment_kmh: number;
   ml_applied: boolean;
   wrf_nearby_precip_max_mm: number | null;
+  uv_index?: number | null;
   models_comparison: {
     ecmwf?: ModelStepData;
     icon?: ModelStepData;
     gfs?: ModelStepData;
     wrf?: ModelStepData;
+    aifs?: ModelStepData;
   };
 }
 
@@ -83,6 +95,9 @@ export interface DailyForecast {
   precipitation_probability_max_pct: number;
   wind_speed_max_kmh: number;
   weather_code: number;
+  sunrise_local?: string | null;
+  sunset_local?: string | null;
+  uv_index_max?: number | null;
 }
 
 export interface WeatherAlert {
@@ -93,6 +108,7 @@ export interface WeatherAlert {
   type?: string;
   source: string;
   zones?: string[];
+  metadata?: Record<string, any>;
 }
 
 export interface MLMetricsDetails {
@@ -122,12 +138,79 @@ export interface MLMetadata {
   valid_utc_hours_count?: number;
 }
 
+export interface Stage2Details {
+  available: boolean;
+  severe_core_detected: boolean;
+  extreme_core_detected?: boolean;
+  severe_pixels_count?: number;
+  extreme_pixels_count?: number;
+  severe_pixels_pct?: number;
+  min_brightness_temp_c?: number | null;
+  timestamp_str?: string | null;
+}
+
+export interface HailRiskEvaluation {
+  level: 'sin_riesgo' | 'moderado' | 'alto' | 'extremo';
+  score: number;
+  peak_window_local: string;
+  cape_max: number;
+  shear_0_6km_kmh: number;
+  freezing_level_m: number;
+  goes_severe_core_detected: boolean;
+  sentinel_hail_detected: boolean;
+  imminent_hail_alert: boolean;
+  cirrus_rejected: boolean;
+  explanation: string;
+  stage2_details?: Stage2Details;
+}
+
+export interface SentinelStationSummary {
+  icao: string;
+  name: string;
+  description: string;
+  lat: number;
+  lon: number;
+  is_central: boolean;
+  distance_km: number;
+  bearing_deg: number;
+  cardinal: string;
+  operational: boolean;
+  temp_c: number | null;
+  dewp_c: number | null;
+  humidity_pct: number | null;
+  wind_speed_kmh: number | null;
+  wind_gust_kmh: number | null;
+  wind_direction_deg: number | null;
+  qnh_hpa: number | null;
+  wx_codes: string[];
+  raw_metar: string;
+  obs_time_utc: string | null;
+  age_minutes: number | null;
+}
+
+export interface SentinelFrontDetection {
+  detected: boolean;
+  station_icao?: string;
+  station_name?: string;
+  distance_km?: number;
+  cardinal?: string;
+  estimated_arrival_minutes?: number;
+  triggers?: string[];
+  headline?: string;
+  urgency?: 'inmediata' | 'proxima' | 'monitoreo';
+  reason?: string;
+}
+
 export interface WeatherPayload {
   city: CityConfig;
   updated_at_utc: string;
+  summary_one_liner?: string;
   current: CurrentWeather;
   hourly: HourlyForecast[];
   daily: DailyForecast[];
+  sentinels?: SentinelStationSummary[];
+  sentinel_front?: SentinelFrontDetection;
+  hail_risk?: HailRiskEvaluation;
   alerts: WeatherAlert[];
   models_active: string[];
   confidence: 'alta' | 'media' | 'baja';
@@ -151,6 +234,16 @@ export interface SatelliteMetadata {
   infrared?: RadarFrame[];
 }
 
+export interface LightningMetadata {
+  provider: string;
+  product: string;
+  name: string;
+  tile_url_template: string;
+  max_native_zoom: number;
+  latest_time?: string | null;
+  frames: RadarFrame[];
+}
+
 export interface RadarResponse {
   version: string;
   generated: number;
@@ -160,6 +253,7 @@ export interface RadarResponse {
     nowcast?: RadarFrame[];
   };
   satellite?: SatelliteMetadata;
+  lightning?: LightningMetadata;
 }
 
 export interface AccuracyResponse {
@@ -247,4 +341,38 @@ export interface AlertTestResponse {
     detail?: string;
     message_id?: number;
   };
+}
+
+// Sprint 2.2 Route Weather types
+export interface RouteSegment {
+  segment_id: 'origin' | 'midpoint' | 'destination' | string;
+  name: string;
+  lat: number;
+  lon: number;
+  status: 'optimo' | 'precaucion' | 'peligroso';
+  temperature_c: number;
+  apparent_temperature_c: number;
+  condition: string;
+  weather_code: number;
+  rain_mm: number;
+  precip_prob_pct: number;
+  wind_speed_kmh: number;
+  wind_gust_kmh: number;
+  wind_direction_deg: number;
+  visibility_km?: number | null;
+  summary: string;
+}
+
+export interface RouteWeatherResponse {
+  origin: string;
+  origin_name: string;
+  destination: string;
+  destination_name: string;
+  route_name: string;
+  global_status: 'optimo' | 'precaucion' | 'peligroso';
+  max_rain_mm: number;
+  max_gust_kmh: number;
+  summary: string;
+  updated_at_utc: string;
+  segments: RouteSegment[];
 }

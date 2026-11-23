@@ -109,6 +109,19 @@ def test_api_accuracy_endpoint():
     assert "status" in data
 
 
+def test_api_route_weather_endpoint():
+    resp = client.get("/api/route-weather?origin=rio_cuarto&destination=cordoba")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["origin"] == "rio_cuarto"
+    assert data["destination"] == "cordoba"
+    assert data["global_status"] in ("optimo", "precaucion", "peligroso")
+    assert "max_rain_mm" in data
+    assert "max_gust_kmh" in data
+    assert "summary" in data
+    assert len(data["segments"]) == 3
+
+
 def test_cors_headers():
     resp = client.options(
         "/api/weather",

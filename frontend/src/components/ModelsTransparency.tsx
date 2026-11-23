@@ -19,6 +19,16 @@ export const ModelsTransparency: React.FC<ModelsTransparencyProps> = ({
 
   const steps12h = hourly.slice(0, 12);
 
+  const hasAifsData = steps12h.some((step) => {
+    const aifs = step.models_comparison?.aifs;
+    if (!aifs) return false;
+    return (
+      (aifs.temperature_c !== undefined && aifs.temperature_c !== null) ||
+      (aifs.precip_mm !== undefined && aifs.precip_mm !== null) ||
+      (aifs.wind_speed_kmh !== undefined && aifs.wind_speed_kmh !== null)
+    );
+  });
+
   return (
     <section className="px-4 py-2 max-w-md mx-auto w-full">
       <div className="rounded-3xl bg-[#111827] border border-slate-800 shadow-xl overflow-hidden transition-all">
@@ -149,6 +159,9 @@ export const ModelsTransparency: React.FC<ModelsTransparencyProps> = ({
                       <th className="py-2 px-2 text-center">ECMWF</th>
                       <th className="py-2 px-2 text-center">ICON</th>
                       <th className="py-2 px-2 text-center">GFS</th>
+                      {hasAifsData && (
+                        <th className="py-2 px-2 text-center text-purple-300">AIFS</th>
+                      )}
                       <th className="py-2 px-1.5 text-center text-sky-400 font-bold whitespace-nowrap">
                         Final+IA
                       </th>
@@ -211,6 +224,19 @@ export const ModelsTransparency: React.FC<ModelsTransparencyProps> = ({
                           ? `${Math.round(m.gfs.wind_speed_kmh)}`
                           : '--';
 
+                      const valAifs =
+                        selectedMetric === 'temp'
+                          ? m.aifs?.temperature_c !== undefined && m.aifs?.temperature_c !== null
+                            ? `${m.aifs.temperature_c.toFixed(1)}°`
+                            : '--'
+                          : selectedMetric === 'precip'
+                          ? m.aifs?.precip_mm !== undefined && m.aifs?.precip_mm !== null
+                            ? `${m.aifs.precip_mm.toFixed(1)}`
+                            : '--'
+                          : m.aifs?.wind_speed_kmh !== undefined && m.aifs?.wind_speed_kmh !== null
+                          ? `${Math.round(m.aifs.wind_speed_kmh)}`
+                          : '--';
+
                       const valEns =
                         selectedMetric === 'temp'
                           ? `${step.temperature_c.toFixed(1)}°`
@@ -235,6 +261,11 @@ export const ModelsTransparency: React.FC<ModelsTransparencyProps> = ({
                           <td className="py-1.5 px-2 text-center text-slate-300">
                             {valGfs}
                           </td>
+                          {hasAifsData && (
+                            <td className="py-1.5 px-2 text-center text-purple-300 font-medium">
+                              {valAifs}
+                            </td>
+                          )}
                           <td className="py-1.5 px-2 text-center font-bold text-sky-400 bg-sky-950/20">
                             {valEns}
                           </td>

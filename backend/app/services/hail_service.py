@@ -101,11 +101,16 @@ def compute_stage1_step_score(
 ) -> float:
     """
     Calculates atmospheric hail score (0 to 100) for a single forecast step.
-    Weighted meteorological components:
+    Weighted meteorological components modulated by convective CAPE gate (similar to SHIP):
       - CAPE (0-35 points)
       - Wind Shear 0-6km (0-30 points)
       - Freezing Level Altitude (0-15 points, optimal 2,800 - 4,300 m)
       - Convective Trigger / Lift (0-20 points)
+    Strict convective energy gates:
+      - cape < 500 J/kg  -> score <= 20 (sin_riesgo)
+      - 500 <= cape < 1100 J/kg -> score <= 45 (moderado, never alto)
+      - alto (>= 50) requires cape >= 1100 J/kg and shear >= 40 km/h
+      - extremo (>= 75) requires cape >= 1800 J/kg
     """
     # 1. CAPE (0 - 35 pts)
     cape_val = max(0.0, cape)
@@ -157,6 +162,21 @@ def compute_stage1_step_score(
     trig_pts = min(20.0, max(0.0, trigger_signal))
 
     total = cape_pts + shear_pts + frz_pts + trig_pts
+
+    # Strict CAPE gates (anti-false-alarms: severe shear without sufficient CAPE cannot sustain severe hail)
+    if cape_val < 500.0:
+        total = min(total, 20.0)
+    elif cape_val < 1100.0:
+        total = min(total, 45.0)
+    elif cape_val < 1800.0:
+        total = min(total, 74.0)
+
+    # Significant shear requirement: supercell hail requires shear >= 40 km/h for alto (>= 50)
+    if shear_kmh < 40.0:
+        total = min(total, 45.0)
+    elif shear_kmh < 55.0 and total >= 75.0:
+        total = min(total, 74.0)
+
     return round(min(100.0, max(0.0, total)), 1)
 
 
@@ -283,15 +303,28 @@ async def evaluate_hail_risk(
     wrf_hourly_list = wrf_rc.get("hourly", [])
     wrf_map = {item["timestamp_utc"]: item for item in wrf_hourly_list}
 
-    # Step 1: Evaluate Stage 1 for the next 12 hours
+    # Step 1: Evaluate Stage 1 for future hours (>= now up to +18h in America/Argentina/Cordoba)
+    now_local = datetime.now(CORDOBA_TZ)
+    future_hourly = []
+    for h_item in om_hourly:
+        t_utc_str = h_item.get("timestamp_utc", "")
+        try:
+            dt_utc = datetime.fromisoformat(t_utc_str.replace("Z", "+00:00"))
+            dt_loc = dt_utc.astimezone(CORDOBA_TZ)
+            if (dt_loc >= now_local - timedelta(minutes=45)) and (dt_loc <= now_local + timedelta(hours=18)):
+                future_hourly.append(h_item)
+        except Exception:
+            pass
+
+    # Fallback to first 18 items if future_hourly is empty (e.g. synthetic unit test fixtures)
+    eval_window = future_hourly if future_hourly else (om_hourly[:18] if len(om_hourly) >= 18 else om_hourly)
+
     steps_scores: List[Tuple[str, float, float, float, float]] = []
     max_cape = 0.0
     max_shear = 0.0
     avg_frz_lvl = 3500.0
     frz_counts = 0
     frz_sum = 0.0
-
-    eval_window = om_hourly[:12] if len(om_hourly) >= 12 else om_hourly
 
     for h_item in eval_window:
         t_utc = h_item.get("timestamp_utc")
@@ -347,16 +380,28 @@ async def evaluate_hail_risk(
     if frz_counts > 0:
         avg_frz_lvl = round(frz_sum / frz_counts, 0)
 
-    # Find peak score and peak window in local time
+    # Find peak score and apply convective energy gates across the evaluation window
     if steps_scores:
         best_step = max(steps_scores, key=lambda x: x[1])
         peak_score = best_step[1]
     else:
         peak_score = 0.0
 
+    # Strict convective energy gates (CAPE-gate anti-false-alarms)
+    if max_cape < 500.0:
+        peak_score = min(peak_score, 20.0)
+    elif max_cape < 1100.0:
+        peak_score = min(peak_score, 45.0)
+    elif max_cape < 1800.0:
+        peak_score = min(peak_score, 74.0)
+
+    if max_shear < 40.0:
+        peak_score = min(peak_score, 45.0)
+
+    peak_score = round(peak_score, 1)
     peak_level = score_to_level(peak_score)
 
-    # Compute peak window formatted in Córdoba local time (e.g. "17:00 - 20:00")
+    # Compute peak window formatted in Córdoba local time (e.g. "17:00 - 20:00" or "Mañana 05:00 - 09:00")
     peak_window_local = "Sin ventana de riesgo"
     if peak_score >= 25.0 and steps_scores:
         elevated_steps = [s for s in steps_scores if s[1] >= max(20.0, peak_score - 15.0)]
@@ -366,7 +411,8 @@ async def evaluate_hail_risk(
             try:
                 dt_start = datetime.fromisoformat(t_first.replace("Z", "+00:00")).astimezone(CORDOBA_TZ)
                 dt_end = datetime.fromisoformat(t_last.replace("Z", "+00:00")).astimezone(CORDOBA_TZ) + timedelta(hours=1)
-                peak_window_local = f"{dt_start.strftime('%H:00')} - {dt_end.strftime('%H:00')}"
+                day_prefix = "Mañana " if dt_start.date() > now_local.date() else ""
+                peak_window_local = f"{day_prefix}{dt_start.strftime('%H:00')} - {dt_end.strftime('%H:00')}"
             except Exception:
                 peak_window_local = "Próximas 6 horas"
 

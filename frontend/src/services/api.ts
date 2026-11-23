@@ -6,6 +6,7 @@ import type {
   AlertSettingsResponse,
   AlertThresholdSettings,
   AlertTestResponse,
+  RouteWeatherResponse,
 } from '../types/weather';
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
@@ -101,4 +102,24 @@ export async function testTelegramAlert(adminPin?: string): Promise<AlertTestRes
     headers,
   });
   return handleResponse<AlertTestResponse>(res);
+}
+
+export async function fetchRouteWeather(params: {
+  origin?: string;
+  destination: string;
+  destLat?: number;
+  destLon?: number;
+}): Promise<RouteWeatherResponse> {
+  const url = new URL(`${API_BASE_URL}/api/route-weather`, window.location.origin);
+  if (params.origin) url.searchParams.set('origin', params.origin);
+  if (params.destination) url.searchParams.set('destination', params.destination);
+  if (params.destLat !== undefined && params.destLon !== undefined) {
+    url.searchParams.set('dest_lat', params.destLat.toString());
+    url.searchParams.set('dest_lon', params.destLon.toString());
+  }
+  const targetUrl = API_BASE_URL
+    ? `${API_BASE_URL}/api/route-weather?${url.searchParams.toString()}`
+    : `/api/route-weather?${url.searchParams.toString()}`;
+  const res = await fetch(targetUrl);
+  return handleResponse<RouteWeatherResponse>(res);
 }

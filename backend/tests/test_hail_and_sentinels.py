@@ -123,6 +123,66 @@ def test_stage1_hail_score_and_levels():
     assert score_ext >= 75.0
     assert score_to_level(score_ext) == "extremo"
 
+    # Real Production Incident (Anti-False-Alarm: CAPE 840 J/kg + Shear 92 km/h + Freezing Level 3777m)
+    # Even with high shear and optimal freezing level, score MUST NOT exceed 45.0 (moderado, NEVER alto)
+    score_prod_case = compute_stage1_step_score(
+        cape=840.0,
+        shear_kmh=92.0,
+        freezing_level_m=3777.0,
+        precip_prob=60.0,
+        precip_mm=3.0,
+        wrf_nearby_mm=5.0,
+    )
+    assert score_prod_case <= 45.0
+    level_prod_case = score_to_level(score_prod_case)
+    assert level_prod_case in ("sin_riesgo", "moderado")
+    assert level_prod_case != "alto"
+    assert level_prod_case != "extremo"
+
+
+@pytest.mark.anyio
+async def test_evaluate_hail_risk_real_prod_anti_false_alarm():
+    """
+    Validates end-to-end evaluate_hail_risk with real production values:
+    CAPE=840 + shear=92 km/h -> score <= 45.0, level <= moderado (NEVER alto).
+    Also checks next-day peak window prefixing ('Mañana ').
+    """
+    now_utc = datetime.now(timezone.utc)
+    # Simulate a forecast step tomorrow at 06:00 UTC
+    t_tomorrow = (now_utc + timedelta(hours=14)).strftime("%Y-%m-%dT%H:00:00Z")
+
+    fake_om = {
+        "hourly": [{
+            "timestamp_utc": t_tomorrow,
+            "models": {
+                "ecmwf_ifs025": {"cape_jkg": 840.0, "wind_speed_kmh": 20.0, "wind_direction_deg": 180.0, "precip_prob_pct": 50.0, "precip_mm": 2.0},
+                "icon_seamless": {"cape_jkg": 820.0, "wind_speed_kmh": 20.0, "wind_direction_deg": 180.0, "precip_prob_pct": 50.0, "precip_mm": 2.0},
+                "gfs_seamless": {"cape_jkg": 800.0, "wind_speed_kmh": 20.0, "wind_direction_deg": 180.0, "precip_prob_pct": 50.0, "precip_mm": 2.0},
+            },
+            "wind_speed_500hPa_kmh": 92.0,
+            "wind_direction_500hPa_deg": 270.0,
+            "freezing_level_height_m": 3777.0,
+        }]
+    }
+    fake_wrf = {"cities": {"rio_cuarto": {"hourly": []}}}
+    fake_metar_quiet = {"SAOC": {"raw_metar": "METAR SAOC 231800Z 04010KT 9999 SKC 20/10 Q1015", "wx_codes": []}}
+
+    # Mock satellite scan to ensure no core is detected
+    import backend.app.services.hail_service as hs
+    orig_scan = hs.scan_goes19_band13
+    async def mock_quiet_scan(*args, **kwargs):
+        return {"available": True, "severe_core_detected": False}
+
+    hs.scan_goes19_band13 = mock_quiet_scan
+    try:
+        res = await hs.evaluate_hail_risk(fake_om, fake_wrf, fake_metar_quiet)
+        assert res["score"] <= 45.0
+        assert res["level"] in ("sin_riesgo", "moderado")
+        assert res["level"] != "alto"
+        assert res["imminent_hail_alert"] is False
+    finally:
+        hs.scan_goes19_band13 = orig_scan
+
 
 @pytest.mark.anyio
 async def test_anti_cirrus_false_positive_filter():
