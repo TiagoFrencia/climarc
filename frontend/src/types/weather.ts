@@ -15,6 +15,7 @@ export interface CurrentWeather {
   timestamp_utc: string;
   temperature_c: number;
   apparent_temperature_c: number;
+  dew_point_c?: number | null;
   relative_humidity_pct: number | null;
   wind_speed_kmh: number;
   wind_gust_kmh: number;
@@ -31,6 +32,8 @@ export interface CurrentWeather {
   metar_station: string | null;
   metar_age_minutes: number | null;
   metar_raw: string;
+  metar_wx_raw?: string | null;
+  is_precipitating_now?: boolean;
 }
 
 export interface ModelStepData {

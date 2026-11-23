@@ -1,9 +1,117 @@
 import math
+import re
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
 from ..database import save_forecast_snapshots
 from .ml_corrector import ml_corrector
+
+
+def calculate_dew_point(temp_c: Optional[float], rh_pct: Optional[float]) -> Optional[float]:
+    """
+    Computes dew point (°C) from temperature and relative humidity using Magnus-Tetens:
+    Td = (b * alpha) / (a - alpha)
+    where alpha = (a * T)/(b + T) + ln(RH / 100)
+    """
+    if temp_c is None or rh_pct is None:
+        return None
+    try:
+        if rh_pct <= 0:
+            return round(temp_c - 30.0, 1)
+        if rh_pct >= 100.0:
+            return round(temp_c, 1)
+        a = 17.625
+        b = 243.04
+        alpha = (a * temp_c) / (b + temp_c) + math.log(rh_pct / 100.0)
+        td = (b * alpha) / (a - alpha)
+        return round(td, 1)
+    except Exception:
+        return None
+
+
+def calculate_apparent_temperature(temp_c: float, rh_pct: Optional[float], wind_kmh: float) -> float:
+    """
+    Computes apparent temperature (°C) using Steadman's physical formula
+    (Bureau of Meteorology standard):
+    AT = T + 0.33 * e - 0.70 * v - 4.00
+    where:
+      T = Dry bulb temperature (°C)
+      e = Water vapor pressure (hPa) = (rh / 100) * 6.105 * exp((17.27 * T) / (237.7 + T))
+      v = Wind speed at 10m (m/s) = wind_kmh / 3.6
+    """
+    try:
+        rh = rh_pct if rh_pct is not None else 50.0
+        v = max(0.0, wind_kmh / 3.6)
+        e = (rh / 100.0) * 6.105 * math.exp((17.27 * temp_c) / (237.7 + temp_c))
+        at = temp_c + 0.33 * e - 0.70 * v - 4.00
+        return round(at, 1)
+    except Exception:
+        return round(temp_c, 1)
+
+
+def parse_metar_phenomenon(metar_data: Optional[Dict[str, Any]]) -> Tuple[Optional[int], Optional[str], bool]:
+    """
+    Parses METAR weather phenomenon string/codes and maps to WMO weather code:
+      - GR / GS / +TSRA -> WMO 99 (Tormenta fuerte / Granizo)
+      - TS / TSRA / VCTS -> WMO 95 (Tormenta eléctrica)
+      - +RA / +SHRA -> WMO 65 (Lluvia fuerte)
+      - RA / SHRA -> WMO 63 (Lluvia / Chaparrones)
+      - DZ / -RA -> WMO 51 (Llovizna / Lluvia débil)
+      - FG / BR -> WMO 45 (Niebla / Neblina)
+    Returns: (wmo_code, metar_wx_raw_str, is_precipitating_now)
+    """
+    if not metar_data:
+        return None, None, False
+
+    tokens = set()
+    wx_str = metar_data.get("wx_string")
+    if wx_str:
+        for p in str(wx_str).split():
+            clean = p.strip().upper()
+            if clean:
+                tokens.add(clean)
+
+    for c in metar_data.get("wx_codes", []) or []:
+        if c:
+            clean = str(c).strip().upper()
+            if clean:
+                tokens.add(clean)
+
+    raw = metar_data.get("raw_metar") or ""
+    found = re.findall(
+        r"\b(\+|-|VC)?(TS|SH|FZ|BL|DR)?(RA|DZ|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS|DS)\b",
+        raw,
+    )
+    for m in found:
+        tok = "".join(m).strip().upper()
+        if tok:
+            tokens.add(tok)
+
+    if not tokens:
+        return None, None, False
+
+    metar_wx_raw = wx_str if wx_str else " ".join(sorted(tokens))
+
+    # Check if precipitating (RA, DZ, TSRA, SHRA, GR, GS, SN, SG, PL)
+    precip_patterns = ("RA", "DZ", "TSRA", "SHRA", "GR", "GS", "SN", "SG", "PL")
+    is_precip = any(any(p in t for p in precip_patterns) for t in tokens)
+
+    # WMO hierarchy
+    w_code = None
+    if any(t in ("GR", "GS", "+TSRA", "+TSGR", "TSGR") or "GR" in t or "GS" in t for t in tokens):
+        w_code = 99
+    elif any(t in ("TS", "TSRA", "-TSRA", "+TS", "VCTS", "VCTSRA") or "TS" in t for t in tokens):
+        w_code = 95
+    elif any(t in ("+RA", "+SHRA") for t in tokens):
+        w_code = 65
+    elif any(t in ("RA", "SHRA", "VCRA", "VCSH") for t in tokens):
+        w_code = 63
+    elif any(t in ("DZ", "-DZ", "+DZ", "-RA", "-SHRA") for t in tokens):
+        w_code = 51
+    elif any(t in ("FG", "BR", "FZFG", "MIFG") for t in tokens):
+        w_code = 45
+
+    return w_code, metar_wx_raw, is_precip
 
 
 def generate_ensemble_forecast(
@@ -294,11 +402,14 @@ def generate_ensemble_forecast(
 
         wrf_nearby_p = wrf_item.get("precip_nearby_max_mm") if wrf_item else None
 
+        # Standard Steadman physical apparent temperature
+        phys_app_t = calculate_apparent_temperature(final_temp, final_rh, final_wind)
+
         hourly_record = {
             "lead_hour": step_idx,
             "timestamp_utc": t_utc,
             "temperature_c": final_temp,
-            "apparent_temperature_c": round(ens_app_temp, 1) if ens_app_temp is not None else final_temp,
+            "apparent_temperature_c": phys_app_t,
             "relative_humidity_pct": final_rh,
             "precip_mm": round(ens_precip, 2),
             "precip_prob_pct": round(ens_prob, 0),
@@ -343,7 +454,7 @@ def generate_ensemble_forecast(
     daily_weights = {"ecmwf_ifs025": 0.55, "icon_seamless": 0.25, "gfs_seamless": 0.20}
     blended_daily: List[Dict[str, Any]] = []
 
-    for d_item in om_daily:
+    for d_idx, d_item in enumerate(om_daily):
         d_date = d_item["date"]
         d_models = d_item.get("models", {})
 
@@ -360,13 +471,31 @@ def generate_ensemble_forecast(
         valid_probs = [p for p in probs if p is not None]
 
         w_code = m_ec.get("weather_code") or m_ic.get("weather_code") or 0
+        p_prob = max(valid_probs) if valid_probs else 0.0
+        p_sum = round(max(0.0, _weighted_mean(precip_sums, daily_weights)), 1)
+        max_t = round(_weighted_mean(max_temps, daily_weights), 1)
+        min_t = round(_weighted_mean(min_temps, daily_weights), 1)
+
+        # FIX 4.1: Para daily[0] (Hoy), asegurar coherencia con current.temperature_c y METAR
+        if d_idx == 0 and blended_hourly:
+            curr_temp = blended_hourly[0]["temperature_c"]
+            min_t = round(min(min_t, curr_temp), 1)
+            max_t = round(max(max_t, curr_temp), 1)
+            if metar_fresh and metar_data and metar_data.get("temp_c") is not None:
+                m_t = float(metar_data["temp_c"])
+                min_t = round(min(min_t, m_t), 1)
+                max_t = round(max(max_t, m_t), 1)
+
+        # FIX 4.2: Normalizar weather_code si precip_prob_pct < 15 y precip_sum_mm < 0.2 y w_code >= 51
+        if p_prob < 15 and p_sum < 0.2 and w_code >= 51:
+            w_code = 3
 
         blended_daily.append({
             "date": d_date,
-            "temperature_max_c": round(_weighted_mean(max_temps, daily_weights), 1),
-            "temperature_min_c": round(_weighted_mean(min_temps, daily_weights), 1),
-            "precipitation_sum_mm": round(max(0.0, _weighted_mean(precip_sums, daily_weights)), 1),
-            "precipitation_probability_max_pct": max(valid_probs) if valid_probs else 0.0,
+            "temperature_max_c": max_t,
+            "temperature_min_c": min_t,
+            "precipitation_sum_mm": p_sum,
+            "precipitation_probability_max_pct": p_prob,
             "wind_speed_max_kmh": round(_weighted_mean(winds_max, daily_weights), 1),
             "weather_code": w_code,
         })
@@ -375,10 +504,44 @@ def generate_ensemble_forecast(
     current_block = {}
     if blended_hourly:
         h0 = blended_hourly[0]
+
+        # FIX 3: Dew point from METAR when fresh or via Magnus-Tetens
+        dew_point_c = None
+        if metar_fresh and metar_data and metar_data.get("dewp_c") is not None:
+            try:
+                dew_point_c = round(float(metar_data["dewp_c"]), 1)
+            except (ValueError, TypeError):
+                dew_point_c = calculate_dew_point(h0["temperature_c"], h0["relative_humidity_pct"])
+        else:
+            dew_point_c = calculate_dew_point(h0["temperature_c"], h0["relative_humidity_pct"])
+
+        # FIX 1: METAR weather code override & real precipitation detection
+        metar_w_code = None
+        metar_wx_raw = None
+        metar_is_precip = False
+        if metar_fresh and metar_data:
+            metar_w_code, metar_wx_raw, metar_is_precip = parse_metar_phenomenon(metar_data)
+
+        # If METAR has active phenomenon, override current and hourly[0] weather_code
+        if metar_w_code is not None:
+            h0["weather_code"] = metar_w_code
+
+        # Is precipitating now flag
+        is_precipitating_now = metar_is_precip or (h0.get("precip_mm", 0.0) >= 0.1)
+
+        # Physical Steadman apparent temperature for current and h0
+        current_app_temp = calculate_apparent_temperature(
+            h0["temperature_c"],
+            h0["relative_humidity_pct"],
+            h0["wind_speed_kmh"],
+        )
+        h0["apparent_temperature_c"] = current_app_temp
+
         current_block = {
             "timestamp_utc": h0["timestamp_utc"],
             "temperature_c": h0["temperature_c"],
-            "apparent_temperature_c": h0["apparent_temperature_c"],
+            "apparent_temperature_c": current_app_temp,
+            "dew_point_c": dew_point_c,
             "relative_humidity_pct": h0["relative_humidity_pct"],
             "wind_speed_kmh": h0["wind_speed_kmh"],
             "wind_gust_kmh": h0["wind_gust_kmh"],
@@ -395,6 +558,8 @@ def generate_ensemble_forecast(
             "metar_station": metar_data.get("icao") if metar_data else None,
             "metar_age_minutes": metar_data.get("age_minutes") if metar_data else None,
             "metar_raw": metar_data.get("raw_metar") if metar_data else "",
+            "metar_wx_raw": metar_wx_raw,
+            "is_precipitating_now": is_precipitating_now,
         }
 
     return {

@@ -166,3 +166,163 @@ def test_confidence_index(sample_open_meteo):
         reference_time=REF_TIME,
     )
     assert res_divergent["hourly"][0]["confidence"] == "baja"
+
+
+def test_metar_weather_code_override(sample_open_meteo):
+    # Models say weather_code=1 (clear/mainly clear)
+    # METAR reports TSRA with age < 90 min
+    metar_thunderstorm = {
+        "icao": "SAOC",
+        "age_minutes": 15.0,
+        "temp_c": 18.0,
+        "dewp_c": 16.0,
+        "humidity_pct": 88.0,
+        "wind_speed_kmh": 25.0,
+        "qnh_hpa": 1011.0,
+        "wx_string": "TSRA",
+        "raw_metar": "METAR SAOC 230000Z 02014KT 4000 TSRA BKN020 18/16 Q1011",
+    }
+
+    res = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=metar_thunderstorm,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+
+    curr = res["current"]
+    assert curr["weather_code"] == 95  # Thunderstorm
+    assert res["hourly"][0]["weather_code"] == 95
+    assert curr["is_precipitating_now"] is True
+    assert curr["metar_wx_raw"] == "TSRA"
+
+    # Test hail / severe thunderstorm override: +TSRA GR -> 99
+    metar_hail = {
+        "icao": "SAOC",
+        "age_minutes": 10.0,
+        "temp_c": 17.0,
+        "dewp_c": 15.0,
+        "humidity_pct": 90.0,
+        "wind_speed_kmh": 35.0,
+        "qnh_hpa": 1009.0,
+        "wx_string": "+TSRA GR",
+        "raw_metar": "METAR SAOC 230000Z 02020KT 2000 +TSRA GR BKN015 17/15 Q1009",
+    }
+    res_hail = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=metar_hail,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+    assert res_hail["current"]["weather_code"] == 99
+    assert res_hail["current"]["is_precipitating_now"] is True
+
+    # Test rain override: RA -> 63
+    metar_rain = {
+        "icao": "SAOC",
+        "age_minutes": 20.0,
+        "temp_c": 16.0,
+        "dewp_c": 15.0,
+        "humidity_pct": 94.0,
+        "wind_speed_kmh": 12.0,
+        "qnh_hpa": 1010.0,
+        "wx_string": "RA",
+        "raw_metar": "METAR SAOC 230000Z 02006KT 5000 RA OVC020 16/15 Q1010",
+    }
+    res_rain = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=metar_rain,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+    assert res_rain["current"]["weather_code"] == 63
+    assert res_rain["current"]["is_precipitating_now"] is True
+
+
+def test_apparent_temperature_and_dew_point(sample_open_meteo):
+    # Anchor at 15.0 C, 85% RH, 14.0 km/h wind
+    metar = {
+        "icao": "SAOC",
+        "age_minutes": 10.0,
+        "temp_c": 15.0,
+        "dewp_c": 12.5,
+        "humidity_pct": 85.0,
+        "wind_speed_kmh": 14.0,
+        "qnh_hpa": 1010.0,
+        "wx_string": None,
+        "raw_metar": "METAR SAOC 230000Z 02008KT 9999 BKN030 15/13 Q1010",
+    }
+
+    # Set sample open meteo to same values
+    h0 = sample_open_meteo["hourly"][0]
+    for m in ("ecmwf_ifs025", "icon_seamless", "gfs_seamless"):
+        h0["models"][m]["temperature_c"] = 15.0
+        h0["models"][m]["relative_humidity_pct"] = 85.0
+        h0["models"][m]["wind_speed_kmh"] = 14.0
+
+    res = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=metar,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+
+    curr = res["current"]
+    assert curr["temperature_c"] == 15.0
+    # Steadman apparent temperature with 14 km/h wind must be colder than 15 C (around 13.1 C)
+    assert curr["apparent_temperature_c"] < 15.0
+    assert 12.5 <= curr["apparent_temperature_c"] <= 13.5
+    # Dew point must be exposed and equal to METAR dewp_c
+    assert curr["dew_point_c"] == 12.5
+
+
+def test_daily_forecast_coherence(sample_open_meteo):
+    # Daily[0] predicted min 18.0 C, but current temperature is 15.0 C
+    sample_open_meteo["daily"][0]["models"]["ecmwf_ifs025"]["temperature_min_c"] = 18.0
+    sample_open_meteo["daily"][0]["models"]["icon_seamless"]["temperature_min_c"] = 18.0
+    sample_open_meteo["daily"][0]["models"]["gfs_seamless"]["temperature_min_c"] = 18.0
+
+    # Also set daily[0] with weather_code 61 (rain) but 0% prob and 0.0 mm
+    sample_open_meteo["daily"][0]["models"]["ecmwf_ifs025"]["weather_code"] = 61
+    sample_open_meteo["daily"][0]["models"]["ecmwf_ifs025"]["precipitation_probability_max_pct"] = 5.0
+    sample_open_meteo["daily"][0]["models"]["ecmwf_ifs025"]["precipitation_sum_mm"] = 0.0
+    sample_open_meteo["daily"][0]["models"]["icon_seamless"]["precipitation_probability_max_pct"] = 5.0
+    sample_open_meteo["daily"][0]["models"]["icon_seamless"]["precipitation_sum_mm"] = 0.0
+    sample_open_meteo["daily"][0]["models"]["gfs_seamless"]["precipitation_probability_max_pct"] = 5.0
+    sample_open_meteo["daily"][0]["models"]["gfs_seamless"]["precipitation_sum_mm"] = 0.0
+
+    metar = {
+        "icao": "SAOC",
+        "age_minutes": 10.0,
+        "temp_c": 15.0,
+        "dewp_c": 10.0,
+        "humidity_pct": 70.0,
+        "wind_speed_kmh": 10.0,
+        "qnh_hpa": 1010.0,
+        "wx_string": None,
+        "raw_metar": "METAR SAOC 230000Z 02005KT 9999 SKC 15/10 Q1010",
+    }
+
+    res = generate_ensemble_forecast(
+        city_key="rio_cuarto",
+        open_meteo_data=sample_open_meteo,
+        wrf_data={"wrf_available": False, "cities": {}},
+        metar_data=metar,
+        reference_time=REF_TIME,
+        enable_ml=False,
+    )
+
+    d0 = res["daily"][0]
+    # FIX 4.1: Daily min must not exceed current temperature (15.0)
+    assert d0["temperature_min_c"] <= 15.0
+
+    # FIX 4.2: Daily weather code must be normalized to 3 (cloudy) instead of rain icon with 0%
+    assert d0["weather_code"] == 3

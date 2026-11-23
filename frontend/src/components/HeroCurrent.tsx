@@ -18,21 +18,33 @@ import {
 interface HeroCurrentProps {
   current: CurrentWeather;
   firstHour?: HourlyForecast;
+  nextHour?: HourlyForecast;
   city: CityConfig;
+}
+
+function getComfortLabel(dewPointC: number): string {
+  if (dewPointC < 10) return 'Seco';
+  if (dewPointC <= 16) return 'Agradable';
+  if (dewPointC <= 20) return 'Húmedo';
+  return 'Pesado';
 }
 
 export const HeroCurrent: React.FC<HeroCurrentProps> = ({
   current,
   firstHour,
+  nextHour,
   city,
 }) => {
   const isDay = isDaylightInArgentina(current.timestamp_utc);
   const condition = getWeatherCondition(current.weather_code, isDay);
   const windDirCardinal = degreesToCardinal(current.wind_direction_deg);
 
-  // Precipitation info: check hourly[0]
+  // Precipitation info: check hourly[0] and nextHour
   const precipMm = firstHour ? firstHour.precip_mm : 0.0;
+  const nextHourMm = nextHour ? nextHour.precip_mm : 0.0;
+  const maxPrecipMm = Math.max(precipMm, nextHourMm);
   const precipProb = firstHour ? firstHour.precip_prob_pct : 0;
+  const isPrecipNow = Boolean(current.is_precipitating_now);
 
   // Temperature formatted
   const tempRounded = Math.round(current.temperature_c);
@@ -122,12 +134,12 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
             </div>
           </div>
 
-          {/* Humidity */}
+          {/* Humidity & Real Dew Point */}
           <div className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800/60">
             <div className="p-2 rounded-lg bg-sky-950/60 text-sky-400">
               <Droplets className="w-4 h-4" />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="text-[10px] text-slate-400 uppercase font-medium">
                 Humedad
               </div>
@@ -136,8 +148,10 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
                   ? `${Math.round(current.relative_humidity_pct)}%`
                   : '--%'}
               </div>
-              <div className="text-[10px] text-slate-400">
-                Punto de rocío óptimo
+              <div className="text-[10px] text-slate-400 truncate">
+                {current.dew_point_c !== null && current.dew_point_c !== undefined
+                  ? `Rocío: ${Math.round(current.dew_point_c)}°C (${getComfortLabel(current.dew_point_c)})`
+                  : 'Punto de rocío'}
               </div>
             </div>
           </div>
@@ -167,15 +181,31 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
             <div className="p-2 rounded-lg bg-blue-950/60 text-blue-400">
               <CloudRain className="w-4 h-4" />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="text-[10px] text-slate-400 uppercase font-medium">
                 Lluvia Próx. Hora
               </div>
               <div className="font-bold text-slate-200 text-sm">
-                {precipMm > 0 ? `${precipMm.toFixed(1)} mm` : '0 mm'}
+                {isPrecipNow && maxPrecipMm === 0 ? (
+                  <span className="text-sky-300 font-extrabold animate-pulse">Lloviendo ahora</span>
+                ) : maxPrecipMm > 0 ? (
+                  `${maxPrecipMm.toFixed(1)} mm`
+                ) : (
+                  '0 mm'
+                )}
               </div>
-              <div className="text-[10px] text-slate-400">
-                Probabilidad: {precipProb}%
+              <div className="text-[10px] text-slate-400 truncate">
+                {isPrecipNow ? (
+                  maxPrecipMm > 0 ? (
+                    <span className="text-sky-400 font-medium">Lloviendo ahora</span>
+                  ) : current.metar_wx_raw ? (
+                    `Reporte: ${current.metar_wx_raw}`
+                  ) : (
+                    'Detectado en estación'
+                  )
+                ) : (
+                  `Probabilidad: ${precipProb}%`
+                )}
               </div>
             </div>
           </div>

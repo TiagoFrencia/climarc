@@ -98,9 +98,11 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
 
   const currentFrame = allFrames[currentIndex];
 
-  // Tile URL for CartoDB Dark Matter
-  const cartoDarkUrl =
-    'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+  // Tile URLs for Esri World Dark Gray Canvas (100% free, no API key required)
+  const esriDarkBaseUrl =
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}';
+  const esriDarkRefUrl =
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}';
 
   // Tile URL for current RainViewer radar frame
   const radarTileUrl =
@@ -164,22 +166,32 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
             >
               <MapViewController center={[lat, lon]} zoom={8} />
 
-              {/* CartoDB Dark Matter Base Tiles */}
+              {/* Esri World Dark Gray Canvas Base Tiles (Free, no API key) */}
               <TileLayer
-                url={cartoDarkUrl}
-                subdomains={['a', 'b', 'c', 'd']}
-                maxZoom={19}
-                attribution='&copy; <a href="https://carto.com/">CARTO</a>'
+                url={esriDarkBaseUrl}
+                maxNativeZoom={16}
+                maxZoom={16}
+                attribution='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ'
               />
 
-              {/* Animated RainViewer Radar Layer */}
+              {/* Esri Reference Overlay (Cities, borders & roads) */}
+              <TileLayer
+                url={esriDarkRefUrl}
+                maxNativeZoom={16}
+                maxZoom={16}
+                opacity={0.85}
+                zIndex={5}
+              />
+
+              {/* Animated RainViewer Radar Layer (maxNativeZoom=7 to prevent Zoom Level Not Supported) */}
               {radarTileUrl && (
                 <TileLayer
                   key={currentFrame?.path || 'radar-layer'}
                   url={radarTileUrl}
                   opacity={0.72}
-                  maxZoom={12}
-                  zIndex={20}
+                  maxNativeZoom={7}
+                  maxZoom={14}
+                  zIndex={10}
                 />
               )}
 

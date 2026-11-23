@@ -139,6 +139,7 @@ export const App: React.FC = () => {
             <HeroCurrent
               current={weatherData.current}
               firstHour={weatherData.hourly[0]}
+              nextHour={weatherData.hourly[1]}
               city={weatherData.city}
             />
 
