@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -81,14 +81,14 @@ class Settings(BaseSettings):
     ALERT_QUIET_END_HOUR: int = int(os.getenv("ALERT_QUIET_END_HOUR", "7"))
 
     # CORS
-    ALLOWED_ORIGINS: List[str] = [
+    ALLOWED_ORIGINS: Union[List[str], str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
 
-    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @field_validator("ALLOWED_ORIGINS", mode="after")
     @classmethod
     def parse_allowed_origins(cls, v: Any) -> Any:
         if isinstance(v, str):
