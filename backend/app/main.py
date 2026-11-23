@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
@@ -29,6 +31,7 @@ from .services.telegram_service import format_test_message, send_telegram_alert
 from .services.alerts_service import check_and_dispatch_cron
 
 RAINVIEWER_MAPS_URL = "https://api.rainviewer.com/public/weather-maps.json"
+REALEARTH_TIMES_URL = "https://realearth.ssec.wisc.edu/api/times?products=G19-ABI-FD-BAND13"
 
 
 @asynccontextmanager
@@ -199,8 +202,10 @@ async def get_weather(
 @app.get("/api/radar")
 async def get_radar():
     """
-    Cached proxy (5 min TTL) for RainViewer real-time radar metadata.
+    Cached proxy (5 min TTL) for RainViewer real-time radar metadata and
+    SSEC RealEarth GOES-19 Full Disk Clean Infrared (Band 13) satellite imagery.
     Reduces client calls to external API while ensuring map tile availability.
+    Gracefully degrades if one provider is unreachable.
     """
     cache_key = "radar:rainviewer_maps"
     cached = get_cached_payload(cache_key, max_age_seconds=300)
@@ -210,13 +215,69 @@ async def get_radar():
     headers = {"User-Agent": settings.USER_AGENT}
     try:
         async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
-            resp = await client.get(RAINVIEWER_MAPS_URL, headers=headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                set_cached_payload(cache_key, data)
-                return data
+            rv_task = client.get(RAINVIEWER_MAPS_URL, headers=headers)
+            re_task = client.get(REALEARTH_TIMES_URL, headers=headers)
+            rv_res, re_res = await asyncio.gather(rv_task, re_task, return_exceptions=True)
+
+            if isinstance(rv_res, httpx.Response) and rv_res.status_code == 200:
+                data = rv_res.json()
+            elif isinstance(rv_res, httpx.Response):
+                raise HTTPException(status_code=rv_res.status_code, detail="RainViewer returned non-200")
+            elif isinstance(rv_res, Exception):
+                raise rv_res
             else:
-                raise HTTPException(status_code=resp.status_code, detail="RainViewer returned non-200")
+                raise HTTPException(status_code=502, detail="No response from RainViewer")
+
+            # Parse GOES-19 Infrared satellite frames from SSEC RealEarth
+            sat_frames = []
+            if isinstance(re_res, httpx.Response) and re_res.status_code == 200:
+                try:
+                    re_json = re_res.json()
+                    re_times = re_json.get("G19-ABI-FD-BAND13", [])
+                    # Take up to last 12 frames (spanning ~2 hours of real satellite imagery)
+                    selected_times = re_times[-12:] if len(re_times) >= 12 else re_times
+                    for t_str in selected_times:
+                        try:
+                            dt = datetime.strptime(t_str, "%Y%m%d.%H%M%S").replace(tzinfo=timezone.utc)
+                            u_ts = int(dt.timestamp())
+                        except Exception:
+                            u_ts = int(time.time())
+                        sat_frames.append({
+                            "time": u_ts,
+                            "time_str": t_str,
+                            "path": f"/tiles/G19-ABI-FD-BAND13/{t_str}",
+                        })
+                except Exception:
+                    pass
+
+            # Populate satellite block
+            rv_existing_sat = data.get("satellite", {}).get("infrared", [])
+            if not rv_existing_sat and sat_frames:
+                data["satellite"] = {
+                    "provider": "realearth_goes19",
+                    "product": "G19-ABI-FD-BAND13",
+                    "name": "GOES-19 Full Disk Band 13 (Clean IR)",
+                    "tile_url_template": "https://realearth.ssec.wisc.edu/tiles/G19-ABI-FD-BAND13/{z}/{x}/{y}.png?time={time}",
+                    "max_native_zoom": 7,
+                    "infrared": sat_frames,
+                }
+            elif rv_existing_sat:
+                data["satellite"] = {
+                    "provider": "rainviewer",
+                    "product": "infrared",
+                    "name": "RainViewer Satellite IR",
+                    "tile_url_template": f"{data.get('host', '')}{{path}}/256/{{z}}/{{x}}/{{y}}/0/0_0.png",
+                    "max_native_zoom": 7,
+                    "infrared": rv_existing_sat,
+                }
+            else:
+                data["satellite"] = {
+                    "provider": "unavailable",
+                    "infrared": [],
+                }
+
+            set_cached_payload(cache_key, data)
+            return data
     except Exception as exc:
         # Fallback to stale cache if present
         stale = get_cached_payload(cache_key, max_age_seconds=86400)

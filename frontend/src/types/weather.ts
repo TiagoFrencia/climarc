@@ -139,6 +139,16 @@ export interface WeatherPayload {
 export interface RadarFrame {
   time: number;
   path: string;
+  time_str?: string;
+}
+
+export interface SatelliteMetadata {
+  provider?: string;
+  product?: string;
+  name?: string;
+  tile_url_template?: string;
+  max_native_zoom?: number;
+  infrared?: RadarFrame[];
 }
 
 export interface RadarResponse {
@@ -149,9 +159,7 @@ export interface RadarResponse {
     past: RadarFrame[];
     nowcast?: RadarFrame[];
   };
-  satellite?: {
-    infrared?: RadarFrame[];
-  };
+  satellite?: SatelliteMetadata;
 }
 
 export interface AccuracyResponse {

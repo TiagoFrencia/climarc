@@ -54,6 +54,8 @@ def test_api_radar_endpoint():
     assert resp.status_code == 200
     data = resp.json()
     assert "radar" in data or "host" in data
+    assert "satellite" in data
+    assert "infrared" in data["satellite"]
 
 
 def test_api_accuracy_endpoint():

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
-import { Play, Pause, RotateCcw, AlertTriangle, Radio, Loader2 } from 'lucide-react';
+import { Play, Pause, RotateCcw, AlertTriangle, Radio, Loader2, CloudLightning } from 'lucide-react';
 import type { RadarResponse, RadarFrame } from '../types/weather';
 import { fetchRadar } from '../services/api';
 
@@ -10,6 +10,8 @@ interface RadarMapProps {
   lon: number;
   cityName: string;
 }
+
+type LayerMode = 'radar' | 'satellite';
 
 // Controller to smoothly pan map on city switch
 function MapViewController({ center, zoom }: { center: [number, number]; zoom: number }) {
@@ -37,6 +39,7 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
   const [radarData, setRadarData] = useState<RadarResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [activeLayer, setActiveLayer] = useState<LayerMode>('radar');
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const animationTimerRef = useRef<number | null>(null);
@@ -52,12 +55,12 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
           setRadarData(data);
           const pastFrames = data.radar?.past || [];
           if (pastFrames.length > 0) {
-            setCurrentIndex(pastFrames.length - 1); // Set to latest frame
+            setCurrentIndex(pastFrames.length - 1); // Set to latest radar frame
           }
         }
       } catch (err: any) {
         if (mounted) {
-          setError('No se pudo cargar la reflectividad de radar (RainViewer).');
+          setError('No se pudo cargar la telemetría de radar / satélite.');
         }
       } finally {
         if (mounted) setLoading(false);
@@ -69,12 +72,41 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
     };
   }, []);
 
+  // Compute active frames according to selected layer mode
   const allFrames: RadarFrame[] = useMemo(() => {
-    if (!radarData?.radar) return [];
-    const past = radarData.radar.past || [];
-    const nowcast = radarData.radar.nowcast || [];
-    return [...past, ...nowcast];
-  }, [radarData]);
+    if (!radarData) return [];
+    if (activeLayer === 'radar') {
+      const past = radarData.radar?.past || [];
+      const nowcast = radarData.radar?.nowcast || [];
+      return [...past, ...nowcast];
+    } else {
+      return radarData.satellite?.infrared || [];
+    }
+  }, [activeLayer, radarData]);
+
+  // Handle switching layer modes cleanly without index out of bounds
+  const handleLayerChange = (mode: LayerMode) => {
+    if (mode === activeLayer) return;
+    setIsPlaying(false);
+    setActiveLayer(mode);
+    if (!radarData) return;
+
+    const targetFrames =
+      mode === 'radar'
+        ? [...(radarData.radar?.past || []), ...(radarData.radar?.nowcast || [])]
+        : (radarData.satellite?.infrared || []);
+
+    if (targetFrames.length > 0) {
+      if (mode === 'radar') {
+        const pastCount = radarData.radar?.past?.length || targetFrames.length;
+        setCurrentIndex(pastCount - 1);
+      } else {
+        setCurrentIndex(targetFrames.length - 1);
+      }
+    } else {
+      setCurrentIndex(0);
+    }
+  };
 
   // Frame animation timer
   useEffect(() => {
@@ -104,11 +136,24 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
   const esriDarkRefUrl =
     'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}';
 
-  // Tile URL for current RainViewer radar frame
-  const radarTileUrl =
-    radarData?.host && currentFrame?.path
-      ? `${radarData.host}${currentFrame.path}/256/{z}/{x}/{y}/2/1_1.png`
-      : null;
+  // Active weather overlay tile URL
+  const activeTileUrl = useMemo(() => {
+    if (!currentFrame) return null;
+    if (activeLayer === 'radar') {
+      return radarData?.host && currentFrame.path
+        ? `${radarData.host}${currentFrame.path}/256/{z}/{x}/{y}/2/1_1.png`
+        : null;
+    } else {
+      // Satélite IR
+      if (radarData?.satellite?.tile_url_template && currentFrame.time_str) {
+        return radarData.satellite.tile_url_template.replace('{time}', currentFrame.time_str);
+      }
+      // Fallback
+      return radarData?.host && currentFrame.path
+        ? `${radarData.host}${currentFrame.path}/256/{z}/{x}/{y}/0/0_0.png`
+        : null;
+    }
+  }, [activeLayer, currentFrame, radarData]);
 
   const frameTimeStr = currentFrame?.time
     ? new Date(currentFrame.time * 1000).toLocaleTimeString('es-AR', {
@@ -119,22 +164,51 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
     : '--:--';
 
   const isNowcastPrediction =
-    radarData?.radar?.past && currentIndex >= radarData.radar.past.length;
+    activeLayer === 'radar' &&
+    radarData?.radar?.past &&
+    currentIndex >= radarData.radar.past.length;
 
   return (
     <section className="px-4 py-2 max-w-md mx-auto w-full">
       <div className="rounded-3xl bg-[#111827] border border-slate-800 shadow-xl overflow-hidden p-4">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-3">
+        {/* Header with Layer Segmented Control */}
+        <div className="flex items-center justify-between mb-3 gap-2">
           <div className="flex items-center gap-2">
-            <Radio className="w-4 h-4 text-sky-400 animate-pulse" />
-            <h3 className="text-sm font-bold text-slate-100">
-              Radar Meteorológico en Vivo
+            {activeLayer === 'radar' ? (
+              <Radio className="w-4 h-4 text-sky-400 animate-pulse shrink-0" />
+            ) : (
+              <CloudLightning className="w-4 h-4 text-indigo-400 animate-pulse shrink-0" />
+            )}
+            <h3 className="text-sm font-bold text-slate-100 truncate">
+              {activeLayer === 'radar' ? 'Radar en Vivo' : 'Satélite Infrarrojo'}
             </h3>
           </div>
-          <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider bg-slate-800 px-2 py-0.5 rounded-full border border-slate-700">
-            RainViewer Nowcasting
-          </span>
+
+          {/* Segmented Control [ Radar | Satélite IR ] */}
+          <div className="flex items-center bg-slate-800/90 p-0.5 rounded-xl border border-slate-700/80 shrink-0">
+            <button
+              type="button"
+              onClick={() => handleLayerChange('radar')}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
+                activeLayer === 'radar'
+                  ? 'bg-sky-500 text-white shadow-sm shadow-sky-500/30'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Radar
+            </button>
+            <button
+              type="button"
+              onClick={() => handleLayerChange('satellite')}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
+                activeLayer === 'satellite'
+                  ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Satélite IR
+            </button>
+          </div>
         </div>
 
         {/* Map Box */}
@@ -158,42 +232,46 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
           ) : (
             <MapContainer
               center={[lat, lon]}
-              zoom={8}
+              zoom={activeLayer === 'satellite' ? 7 : 8}
               zoomControl={false}
               attributionControl={true}
               scrollWheelZoom={false}
               className="w-full h-full"
             >
-              <MapViewController center={[lat, lon]} zoom={8} />
+              <MapViewController
+                center={[lat, lon]}
+                zoom={activeLayer === 'satellite' ? 7 : 8}
+              />
 
-              {/* Esri World Dark Gray Canvas Base Tiles (Free, no API key) */}
+              {/* 1. Esri World Dark Gray Canvas Base Tiles (zIndex 1) */}
               <TileLayer
                 url={esriDarkBaseUrl}
                 maxNativeZoom={16}
                 maxZoom={16}
+                zIndex={1}
                 attribution='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ'
               />
 
-              {/* Esri Reference Overlay (Cities, borders & roads) */}
-              <TileLayer
-                url={esriDarkRefUrl}
-                maxNativeZoom={16}
-                maxZoom={16}
-                opacity={0.85}
-                zIndex={5}
-              />
-
-              {/* Animated RainViewer Radar Layer (maxNativeZoom=7 to prevent Zoom Level Not Supported) */}
-              {radarTileUrl && (
+              {/* 2. Active Animated Weather Layer (Radar or Infrared Satellite) (zIndex 10) */}
+              {activeTileUrl && (
                 <TileLayer
-                  key={currentFrame?.path || 'radar-layer'}
-                  url={radarTileUrl}
-                  opacity={0.72}
+                  key={`${activeLayer}-${currentFrame?.time_str || currentFrame?.path || 'frame'}`}
+                  url={activeTileUrl}
+                  opacity={activeLayer === 'radar' ? 0.72 : 0.65}
                   maxNativeZoom={7}
                   maxZoom={14}
                   zIndex={10}
                 />
               )}
+
+              {/* 3. Esri Reference Overlay (Cities, borders & roads on top, zIndex 20) */}
+              <TileLayer
+                url={esriDarkRefUrl}
+                maxNativeZoom={16}
+                maxZoom={16}
+                opacity={0.85}
+                zIndex={20}
+              />
 
               {/* Discreet City Center Pin */}
               <Marker position={[lat, lon]} icon={cityMarkerIcon}>
@@ -209,25 +287,36 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
             <div className="absolute top-2.5 right-2.5 z-[400] bg-slate-900/85 backdrop-blur-md border border-slate-700/80 text-xs px-2.5 py-1 rounded-lg shadow-md flex items-center gap-1.5">
               <span
                 className={`w-2 h-2 rounded-full ${
-                  isNowcastPrediction ? 'bg-amber-400' : 'bg-emerald-400'
+                  activeLayer === 'satellite'
+                    ? 'bg-indigo-400'
+                    : isNowcastPrediction
+                    ? 'bg-amber-400'
+                    : 'bg-emerald-400'
                 }`}
               />
               <span className="font-bold text-slate-100">{frameTimeStr}</span>
-              {isNowcastPrediction && (
+              {activeLayer === 'radar' && isNowcastPrediction && (
                 <span className="text-[10px] text-amber-300 font-semibold">(Pronóstico)</span>
+              )}
+              {activeLayer === 'satellite' && (
+                <span className="text-[10px] text-indigo-300 font-semibold">(GOES-19 IR)</span>
               )}
             </div>
           )}
         </div>
 
-        {/* Radar Controls Bar */}
+        {/* Animation & Slider Controls Bar */}
         {allFrames.length > 0 && (
           <div className="mt-3 flex flex-col gap-2 bg-slate-900/60 p-2.5 rounded-xl border border-slate-800">
             <div className="flex items-center gap-3">
               <button
                 onClick={() => setIsPlaying(!isPlaying)}
-                className="p-2 rounded-lg bg-sky-500 hover:bg-sky-400 text-white font-bold transition-all active:scale-95 flex items-center justify-center shrink-0 shadow-sm shadow-sky-500/30"
-                aria-label={isPlaying ? 'Pausar radar' : 'Reproducir radar'}
+                className={`p-2 rounded-lg text-white font-bold transition-all active:scale-95 flex items-center justify-center shrink-0 shadow-sm ${
+                  activeLayer === 'radar'
+                    ? 'bg-sky-500 hover:bg-sky-400 shadow-sky-500/30'
+                    : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/30'
+                }`}
+                aria-label={isPlaying ? 'Pausar' : 'Reproducir'}
               >
                 {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
               </button>
@@ -243,29 +332,75 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
                     setIsPlaying(false);
                     setCurrentIndex(parseInt(e.target.value, 10));
                   }}
-                  className="w-full accent-sky-400 h-1.5 bg-slate-700 rounded-lg cursor-pointer"
+                  className={`w-full h-1.5 bg-slate-700 rounded-lg cursor-pointer ${
+                    activeLayer === 'radar' ? 'accent-sky-400' : 'accent-indigo-400'
+                  }`}
                 />
                 <div className="flex justify-between text-[10px] text-slate-400">
-                  <span>-2 h</span>
+                  <span>{activeLayer === 'radar' ? '-2 h' : '-1.5 h'}</span>
                   <span className="text-slate-200 font-semibold">
                     Cuadro {currentIndex + 1} de {allFrames.length}
                   </span>
-                  <span>+30 m</span>
+                  <span>{activeLayer === 'radar' ? '+30 m' : 'Ahora'}</span>
                 </div>
               </div>
 
               <button
                 onClick={() => {
                   setIsPlaying(false);
-                  setCurrentIndex(
-                    (radarData?.radar?.past?.length || allFrames.length) - 1
-                  );
+                  if (activeLayer === 'radar') {
+                    setCurrentIndex(
+                      (radarData?.radar?.past?.length || allFrames.length) - 1
+                    );
+                  } else {
+                    setCurrentIndex(allFrames.length - 1);
+                  }
                 }}
                 title="Volver a la última observación real"
                 className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-all shrink-0"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
               </button>
+            </div>
+
+            {/* Compact Context Legend */}
+            <div className="pt-1.5 border-t border-slate-800/80">
+              {activeLayer === 'radar' ? (
+                <div className="flex items-center justify-between text-[10px] text-slate-400 px-1">
+                  <span className="text-slate-300 font-semibold">Reflectividad:</span>
+                  <div className="flex items-center gap-1.5 font-medium">
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-cyan-400" />
+                      <span>Débil</span>
+                    </span>
+                    <span className="text-slate-600">→</span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                      <span>Mod.</span>
+                    </span>
+                    <span className="text-slate-600">→</span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-amber-400" />
+                      <span>Fuerte</span>
+                    </span>
+                    <span className="text-slate-600">→</span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-purple-500" />
+                      <span>Granizo</span>
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between text-[10px] text-slate-400 px-1">
+                  <span className="text-indigo-300 font-semibold flex items-center gap-1">
+                    <Radio className="w-3 h-3 text-indigo-400" />
+                    GOES-19 Band 13 (Clean IR)
+                  </span>
+                  <span className="text-slate-300">
+                    Topes nubosos en tiempo real (cobertura total Córdoba)
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}
