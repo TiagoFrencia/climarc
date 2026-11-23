@@ -59,3 +59,11 @@ body {
 .leaflet-bar a:hover {
   background-color: #334155 !important;
 }
+
+.sentinel-radar-marker {
+  background: transparent !important;
+  border: none !important;
+  width: auto !important;
+  height: auto !important;
+}
+

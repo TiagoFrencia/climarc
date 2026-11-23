@@ -12,6 +12,7 @@ Queries 3 strategic points concurrently (Origin, Geographical Midpoint, Destinat
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -20,6 +21,10 @@ from ..config import settings
 from ..database import get_cached_payload, set_cached_payload
 
 logger = logging.getLogger(__name__)
+
+# Fast in-memory cache for repeated route inquiries (5 min TTL)
+_ROUTE_MEM_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_ROUTE_MEM_TTL = 300.0
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -276,8 +281,14 @@ async def get_route_weather(
 
     cache_key = f"route_weather:{orig_cfg['key']}:{dest_key}:{target_lat:.4f}_{target_lon:.4f}"
     if client is None:
+        now_mono = time.monotonic()
+        if cache_key in _ROUTE_MEM_CACHE:
+            ts, mem_payload = _ROUTE_MEM_CACHE[cache_key]
+            if now_mono - ts < _ROUTE_MEM_TTL:
+                return mem_payload
         cached = get_cached_payload(cache_key, max_age_seconds=900)
         if cached:
+            _ROUTE_MEM_CACHE[cache_key] = (now_mono, cached)
             return cached
 
     close_client = False
@@ -317,20 +328,34 @@ async def get_route_weather(
 
         if global_status == "peligroso":
             sec_str = ", ".join(peligrosos)
+            if max_gust >= 65.0:
+                cause_part = f"fuertes ráfagas de {round(max_gust)} km/h o tormentas"
+            elif max_rain >= 10.0:
+                cause_part = f"lluvia torrencial ({round(max_rain, 1)} mm) y calzada anegada"
+            else:
+                cause_part = "tormentas intensas o visibilidad nula"
             global_summary = (
-                f"Condiciones peligrosas en {sec_str}: ráfagas de hasta {round(max_gust)} km/h o tormentas. "
+                f"Condiciones peligrosas en {sec_str}: {cause_part}. "
                 "Evitar traslados si no es indispensable."
             )
         elif global_status == "precaucion":
             sec_str = ", ".join(precauciones)
+            if max_gust >= 40.0 and max_rain >= 0.5:
+                cause_part = f"asfalto mojado ({round(max_rain, 1)} mm) y ráfagas cruzadas de {round(max_gust)} km/h"
+            elif max_gust >= 40.0:
+                cause_part = f"ráfagas cruzadas de {round(max_gust)} km/h con viento lateral"
+            elif max_rain >= 0.5:
+                cause_part = f"asfalto mojado por precipitaciones ({round(max_rain, 1)} mm)"
+            else:
+                cause_part = "visibilidad reducida o calzada húmeda"
             global_summary = (
-                f"Ruta transitable con precaución en {sec_str}: asfalto mojado o ráfagas cruzadas de "
-                f"{round(max_gust)} km/h. Conducir a velocidad moderada."
+                f"Ruta transitable con precaución en {sec_str}: {cause_part}. "
+                "Conducir a velocidad moderada."
             )
         else:
+            wind_note = f" y viento moderado ({round(max_gust)} km/h)" if max_gust >= 25.0 else ""
             global_summary = (
-                f"Corredor {route_name} en condiciones óptimas: calzada seca, visibilidad normal y viento moderado "
-                f"({round(max_gust)} km/h)."
+                f"Corredor {route_name} en condiciones óptimas: calzada seca, visibilidad normal{wind_note}."
             )
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -349,6 +374,7 @@ async def get_route_weather(
             "segments": segments,
         }
 
+        _ROUTE_MEM_CACHE[cache_key] = (time.monotonic(), payload)
         set_cached_payload(cache_key, payload)
         return payload
 

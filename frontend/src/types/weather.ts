@@ -288,7 +288,10 @@ export interface HealthSourceSmn {
 
 export interface HealthSourceDatabase {
   status: string;
-  path: string;
+  path?: string;
+  engine?: string;
+  persistent?: boolean;
+  target?: string;
 }
 
 export interface HealthResponse {

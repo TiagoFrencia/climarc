@@ -772,6 +772,7 @@ def generate_executive_summary(
     w_code = current.get("weather_code", 0)
     is_precip = current.get("is_precipitating_now", False)
     curr_t = current.get("temperature_c")
+    now_local = datetime.now(timezone.utc).astimezone(CORDOBA_TZ)
 
     # 3. Active storm or rain now (strictly requires is_precip for rain, or active severe storm)
     if is_precip and w_code >= 51:
@@ -802,28 +803,36 @@ def generate_executive_summary(
         summary = f"{phenom} en la zona con actividad eléctrica y ambiente inestable."
         return summary[:120]
 
-    # 4. Rain or storm expected in the upcoming 8 hours
+    # 4. Rain or storm expected in the upcoming 8 hours (strictly future hours > now_local)
+    has_future_steps = False
+    for h in hourly[:8]:
+        ts = h.get("timestamp_utc", "")
+        try:
+            if datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(CORDOBA_TZ) > now_local:
+                has_future_steps = True
+                break
+        except Exception:
+            pass
+
     upcoming_rain_hour = None
     upcoming_is_storm = False
     for h in hourly[:8]:
         code = h.get("weather_code", 0)
         prob = h.get("precip_prob_pct") or 0
+        t_str = h.get("timestamp_utc", "")
+        try:
+            dt_r = datetime.fromisoformat(t_str.replace("Z", "+00:00")).astimezone(CORDOBA_TZ)
+            if has_future_steps and dt_r <= now_local:
+                continue
+        except Exception:
+            continue
+
         if code in (95, 96, 99):
             upcoming_is_storm = True
-            t_str = h.get("timestamp_utc", "")
-            try:
-                dt_r = datetime.fromisoformat(t_str.replace("Z", "+00:00")).astimezone(CORDOBA_TZ)
-                upcoming_rain_hour = dt_r.strftime("%H:00")
-            except Exception:
-                pass
+            upcoming_rain_hour = dt_r.strftime("%H:00")
             break
         elif (code in (51, 61, 63, 65) or prob >= 50) and upcoming_rain_hour is None:
-            t_str = h.get("timestamp_utc", "")
-            try:
-                dt_r = datetime.fromisoformat(t_str.replace("Z", "+00:00")).astimezone(CORDOBA_TZ)
-                upcoming_rain_hour = dt_r.strftime("%H:00")
-            except Exception:
-                pass
+            upcoming_rain_hour = dt_r.strftime("%H:00")
 
     if upcoming_rain_hour:
         max_t = daily[0].get("temperature_max_c") if daily else curr_t

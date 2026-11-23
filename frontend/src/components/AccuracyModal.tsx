@@ -79,7 +79,7 @@ export const AccuracyModal: React.FC<AccuracyModalProps> = ({
           {loading ? (
             <div className="flex flex-col items-center justify-center py-10 space-y-2">
               <RefreshCw className="w-6 h-6 text-sky-400 animate-spin" />
-              <p className="text-slate-400 text-xs">Consultando base de datos SQLite y fuentes...</p>
+              <p className="text-slate-400 text-xs">Consultando base de datos y fuentes...</p>
             </div>
           ) : (
             <>
@@ -188,9 +188,15 @@ export const AccuracyModal: React.FC<AccuracyModalProps> = ({
                   {/* Database */}
                   <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800/80 flex items-center justify-between">
                     <div>
-                      <div className="font-semibold text-slate-200">Base SQLite Local</div>
+                      <div className="font-semibold text-slate-200">
+                        {health?.sources.database.engine === 'postgresql'
+                          ? 'PostgreSQL (Neon · Persistente)'
+                          : 'Base SQLite Local'}
+                      </div>
                       <div className="text-[10px] text-slate-400 truncate max-w-[200px]">
-                        {health?.sources.database.path}
+                        {health?.sources.database.engine === 'postgresql'
+                          ? (health?.sources.database.target || 'Pooler externo persistente')
+                          : (health?.sources.database.path || 'climarc.db')}
                       </div>
                     </div>
                     <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800">

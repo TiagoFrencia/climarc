@@ -97,17 +97,17 @@ async def read_wrf_forecast(
         _WRF_CACHE_EXPIRES_AT = now_ts + 60.0
         return result
 
-    # Validate freshness (< 18 hours)
+    # Validate freshness (< 26 hours to comfortably span 12Z / 00Z publishing delays from SMN)
     try:
         clean_run = run_time_str.replace("Z", "+00:00")
         run_dt = datetime.fromisoformat(clean_run)
         now_dt = datetime.now(timezone.utc)
         age_hours = (now_dt - run_dt).total_seconds() / 3600.0
 
-        if age_hours > 18.0:
+        if age_hours > 26.0:
             result = {
                 "wrf_available": False,
-                "reason": f"Corrida WRF vencida ({age_hours:.1f} horas de antigüedad, límite 18h)",
+                "reason": f"Corrida WRF vencida ({age_hours:.1f} horas de antigüedad, límite 26h)",
                 "run_time_utc": run_time_str,
                 "age_hours": round(age_hours, 1),
                 "cities": {},

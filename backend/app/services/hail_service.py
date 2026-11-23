@@ -408,18 +408,36 @@ async def evaluate_hail_risk(
     peak_score = round(peak_score, 1)
     peak_level = score_to_level(peak_score)
 
-    # Compute peak window formatted in Córdoba local time (e.g. "17:00 - 20:00" or "Mañana 05:00 - 09:00")
+    # Compute peak window formatted in Córdoba local time (e.g. "17:00 - 20:00", "22:00 - Mañana 02:00", or "Mañana 05:00 - 09:00")
     peak_window_local = "Sin ventana de riesgo"
     if peak_score >= 25.0 and steps_scores:
-        elevated_steps = [s for s in steps_scores if s[1] >= max(20.0, peak_score - 15.0)]
-        if elevated_steps:
-            t_first = elevated_steps[0][0]
-            t_last = elevated_steps[-1][0]
+        threshold = max(20.0, peak_score - 15.0)
+        elevated_indices = [i for i, s in enumerate(steps_scores) if s[1] >= threshold]
+        if elevated_indices:
+            best_idx = max(elevated_indices, key=lambda i: steps_scores[i][1])
+            # Center on best_idx with a window of max 6 hours (up to 6 hourly steps)
+            min_idx = min(elevated_indices)
+            max_idx = max(elevated_indices)
+            if (max_idx - min_idx + 1) > 6:
+                start_idx = max(min_idx, best_idx - 2)
+                end_idx = min(max_idx, start_idx + 5)
+                if (end_idx - start_idx + 1) < 6 and start_idx > min_idx:
+                    start_idx = max(min_idx, end_idx - 5)
+            else:
+                start_idx = min_idx
+                end_idx = max_idx
+
+            t_first = steps_scores[start_idx][0]
+            t_last = steps_scores[end_idx][0]
             try:
                 dt_start = datetime.fromisoformat(t_first.replace("Z", "+00:00")).astimezone(CORDOBA_TZ)
                 dt_end = datetime.fromisoformat(t_last.replace("Z", "+00:00")).astimezone(CORDOBA_TZ) + timedelta(hours=1)
-                day_prefix = "Mañana " if dt_start.date() > now_local.date() else ""
-                peak_window_local = f"{day_prefix}{dt_start.strftime('%H:00')} - {dt_end.strftime('%H:00')}"
+                if dt_start.date() > now_local.date():
+                    peak_window_local = f"Mañana {dt_start.strftime('%H:00')} - {dt_end.strftime('%H:00')}"
+                elif dt_end.date() > dt_start.date():
+                    peak_window_local = f"{dt_start.strftime('%H:00')} - Mañana {dt_end.strftime('%H:00')}"
+                else:
+                    peak_window_local = f"{dt_start.strftime('%H:00')} - {dt_end.strftime('%H:00')}"
             except Exception:
                 peak_window_local = "Próximas 6 horas"
 

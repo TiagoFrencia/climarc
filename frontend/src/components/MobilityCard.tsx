@@ -72,14 +72,20 @@ export const MobilityCard: React.FC<MobilityCardProps> = ({
     text: 'Calzada seca. Sin lluvia en curso ni en aproximación inmediata.',
   };
   if (isHeavyRain) {
+    const isNearbyWrf = nearbyRain >= 8.0 && currentRain < 5.0 && ![95, 96, 99].includes(current.weather_code);
     roadFactor = {
       status: 'peligroso',
-      text: 'Piso muy resbaladizo o con charcos profundos. Tormenta / lluvia intensa.',
+      text: isNearbyWrf
+        ? 'Tormenta severa en aproximación perimetral (WRF 3x3). Piso muy resbaladizo.'
+        : 'Piso muy resbaladizo o con charcos profundos. Tormenta / lluvia intensa.',
     };
   } else if (isLightRain) {
+    const isNearbyWrf = nearbyRain >= 2.5 && currentRain < 0.2;
     roadFactor = {
       status: 'precaucion',
-      text: 'Asfalto húmedo o lluvia débil en aproximación (WRF 3x3). Frenado comprometido.',
+      text: isNearbyWrf
+        ? 'Lluvia débil en aproximación perimetral (WRF 3x3). Frenado comprometido.'
+        : 'Asfalto húmedo o probabilidad de precipitaciones. Frenado comprometido.',
     };
   }
 

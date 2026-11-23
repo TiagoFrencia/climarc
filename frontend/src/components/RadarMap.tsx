@@ -73,13 +73,13 @@ function createSentinelIcon(s: SentinelStationSummary) {
     className: 'sentinel-radar-marker',
     html: `
       <div style="
-        display: flex;
+        display: inline-flex;
         align-items: center;
         gap: 3px;
         background: ${badgeColor};
         border: 1px solid ${borderColor};
         border-radius: 6px;
-        padding: 2px 4px;
+        padding: 2px 5px;
         box-shadow: 0 2px 6px rgba(0,0,0,0.6);
         color: #F8FAFC;
         font-family: system-ui, -apple-system, sans-serif;
@@ -93,18 +93,18 @@ function createSentinelIcon(s: SentinelStationSummary) {
         ${
           isOp && s.wind_speed_kmh
             ? `
-          <div style="display: flex; align-items: center; gap: 1px; color: #E2E8F0; font-size: 8px;">
+          <div style="display: inline-flex; align-items: center; gap: 2px; color: #E2E8F0; font-size: 8.5px;">
+            <span style="color: #64748B;">·</span>
             <svg style="width: 8px; height: 8px; transform: rotate(${windDir}deg); fill: currentColor;" viewBox="0 0 24 24">
               <path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/>
             </svg>
-            <span>${windSpeed}</span>
+            <span>${windSpeed}km/h</span>
           </div>`
             : ''
         }
       </div>
     `,
-    iconSize: [60, 20],
-    iconAnchor: [30, 10],
+    iconAnchor: [35, 22],
   });
 }
 
@@ -264,6 +264,17 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName, sentinel
     radarData?.radar?.past &&
     currentIndex >= radarData.radar.past.length;
 
+  const liveIndex = useMemo(() => {
+    if (activeLayer === 'radar' && radarData?.radar?.past?.length) {
+      const latestPast = radarData.radar.past[radarData.radar.past.length - 1];
+      const foundIdx = allFrames.findIndex((f) => f.time === latestPast.time);
+      return foundIdx !== -1 ? foundIdx : Math.min(radarData.radar.past.length - 1, allFrames.length - 1);
+    }
+    return Math.max(0, allFrames.length - 1);
+  }, [activeLayer, radarData, allFrames]);
+
+  const isLatestFrame = currentIndex === liveIndex;
+
   const hasLightning = Boolean(radarData?.lightning && radarData.lightning.tile_url_template);
 
   // Render Map Container
@@ -341,8 +352,8 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName, sentinel
             );
           })}
 
-          {/* 3. GLM Lightning Electrical Activity Layer (zIndex 15) */}
-          {showLightning && hasLightning && radarData?.lightning?.tile_url_template && (
+          {/* 3. GLM Lightning Electrical Activity Layer (zIndex 15) - Only visible on latest live frame */}
+          {showLightning && hasLightning && isLatestFrame && radarData?.lightning?.tile_url_template && (
             <TileLayer
               key={`glm-layer-${radarData.lightning.latest_time || 'latest'}`}
               url={radarData.lightning.tile_url_template.replace(

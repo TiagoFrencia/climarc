@@ -25,6 +25,31 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
+function formatAlertTimestamp(utcStr?: string | null): string {
+  if (!utcStr) return 'Sin fecha';
+  try {
+    const d = new Date(utcStr);
+    if (isNaN(d.getTime())) return utcStr;
+    const parts = new Intl.DateTimeFormat('es-AR', {
+      timeZone: 'America/Argentina/Cordoba',
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(d);
+
+    const day = parts.find((p) => p.type === 'day')?.value || '00';
+    const month = parts.find((p) => p.type === 'month')?.value || '00';
+    const hour = parts.find((p) => p.type === 'hour')?.value || '00';
+    const minute = parts.find((p) => p.type === 'minute')?.value || '00';
+
+    return `${day}/${month} ${hour}:${minute} hs`;
+  } catch {
+    return utcStr;
+  }
+}
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
@@ -533,12 +558,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     key={idx}
                     className="p-2 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-start justify-between gap-2 text-[10px]"
                   >
-                    <div className="min-w-0">
-                      <div className="font-semibold text-slate-200 truncate">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-semibold text-slate-200 line-clamp-2 leading-snug">
                         {a.payload_summary || a.alert_key}
                       </div>
-                      <div className="text-slate-500 text-[9px] font-mono">
-                        {a.last_sent_utc ? a.last_sent_utc.replace('T', ' ').replace('Z', ' UTC') : 'Sin fecha'}
+                      <div className="text-slate-500 text-[9px] font-mono mt-0.5">
+                        {formatAlertTimestamp(a.last_sent_utc)}
                       </div>
                     </div>
                     <span

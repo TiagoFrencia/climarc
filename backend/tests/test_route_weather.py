@@ -118,3 +118,37 @@ async def test_get_route_weather_with_mocked_client():
         assert len(res_custom["segments"]) == 3
         assert res_custom["segments"][2]["lat"] == -32.5
         assert res_custom["segments"][2]["lon"] == -63.5
+
+    # 3. Precaution due to rain only with gusts < 40 km/h: verify gusts not cited as caution cause
+    def rain_mild_wind_handler(request: httpx.Request):
+        return httpx.Response(
+            200,
+            json={
+                "current": {
+                    "temperature_2m": 20.0,
+                    "apparent_temperature": 20.0,
+                    "precipitation": 1.5,
+                    "weather_code": 61,
+                    "wind_speed_10m": 12.0,
+                    "wind_gusts_10m": 22.0,
+                    "wind_direction_10m": 90.0,
+                },
+                "hourly": {
+                    "precipitation": [1.5, 1.0, 0.5],
+                    "precipitation_probability": [70, 50, 30],
+                    "wind_speed_10m": [12.0, 12.0, 10.0],
+                    "wind_gusts_10m": [22.0, 24.0, 20.0],
+                    "weather_code": [61, 61, 61],
+                    "visibility": [8000.0, 8000.0, 8000.0],
+                },
+            },
+        )
+
+    transport_rain = httpx.MockTransport(rain_mild_wind_handler)
+    async with httpx.AsyncClient(transport=transport_rain) as client_rain:
+        res_rain = await get_route_weather(origin="rio_cuarto", destination="cordoba", client=client_rain)
+        assert res_rain["global_status"] == "precaucion"
+        assert res_rain["max_gust_kmh"] == 24.0
+        # Ráfagas < 40 km/h must not be cited as reason for caution
+        assert "ráfagas" not in res_rain["summary"].lower()
+        assert "asfalto mojado" in res_rain["summary"].lower()

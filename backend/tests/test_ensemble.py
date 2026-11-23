@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import pytest
-from backend.app.services.ensemble_engine import generate_ensemble_forecast, generate_executive_summary
+from backend.app.services.ensemble_engine import generate_ensemble_forecast, generate_executive_summary, CORDOBA_TZ
 
 REF_TIME = datetime(2026, 11, 23, 0, 0, 0, tzinfo=timezone.utc)
 
@@ -621,5 +621,37 @@ def test_executive_summary_never_claims_active_rain_when_not_precipitating():
 
     summary = generate_executive_summary(current=current, hourly=hourly, daily=daily)
     assert "Lluvia activa en la zona" not in summary
+
+
+def test_executive_summary_filters_past_hours_for_upcoming_rain():
+    """
+    Verifica que generate_executive_summary nunca anuncie 'desde las 19:00' si las 19:00 ya pasaron.
+    Solo debe anunciar horas estrictamente futuras (> now_local).
+    """
+    now_utc = datetime.now(timezone.utc)
+    # Step in the past (e.g. 20 min ago)
+    past_iso = (now_utc - timedelta(minutes=20)).replace(minute=0, second=0).strftime("%Y-%m-%dT%H:00:00Z")
+    # Step in the future (e.g. 2 hours ahead)
+    future_iso = (now_utc + timedelta(hours=2)).strftime("%Y-%m-%dT%H:00:00Z")
+    future_local_hour = (now_utc + timedelta(hours=2)).astimezone(CORDOBA_TZ).strftime("%H:00")
+
+    current = {
+        "weather_code": 1,
+        "is_precipitating_now": False,
+        "temperature_c": 21.0,
+        "wind_speed_kmh": 10.0,
+        "wind_direction_deg": 180.0,
+    }
+    hourly = [
+        {"timestamp_utc": past_iso, "weather_code": 61, "precip_mm": 2.0, "precip_prob_pct": 80},
+        {"timestamp_utc": future_iso, "weather_code": 61, "precip_mm": 1.5, "precip_prob_pct": 75},
+    ]
+    daily = [{"temperature_max_c": 25.0, "temperature_min_c": 15.0}]
+
+    summary = generate_executive_summary(current=current, hourly=hourly, daily=daily)
+    past_local_hour = (now_utc - timedelta(minutes=20)).replace(minute=0, second=0).astimezone(CORDOBA_TZ).strftime("%H:00")
+    assert f"desde las {past_local_hour}" not in summary
+    assert f"desde las {future_local_hour}" in summary
+
 
 
