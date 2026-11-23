@@ -103,16 +103,18 @@ export const HourlyStrip: React.FC<HourlyStripProps> = ({ hourly }) => {
                 <span className="text-[8px] text-slate-500">km/h</span>
               </div>
 
-              {/* WRF 3x3 Neighborhood convective core badge */}
-              {hasNearbyCore && (
-                <div
-                  title={`Modelo WRF-SMN 3x3: Se detecta núcleo convectivo de ${nearbyRain.toFixed(1)} mm a menos de 12 km.`}
-                  className="mt-1.5 w-full py-0.5 px-1 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[9px] font-extrabold flex items-center justify-center gap-0.5"
-                >
-                  <AlertCircle className="w-2.5 h-2.5 shrink-0" />
-                  <span className="truncate">Núcleo {nearbyRain.toFixed(1)}m</span>
-                </div>
-              )}
+              {/* WRF 3x3 Neighborhood convective core badge with uniform height */}
+              <div className="w-full min-h-[22px] mt-1.5 flex items-center justify-center">
+                {hasNearbyCore ? (
+                  <div
+                    title={`Modelo WRF-SMN 3x3: Se detecta núcleo convectivo de ${nearbyRain.toFixed(1)} mm a menos de 12 km.`}
+                    className="w-full py-0.5 px-1 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[9px] font-extrabold flex items-center justify-center gap-0.5 whitespace-nowrap"
+                  >
+                    <AlertCircle className="w-2.5 h-2.5 shrink-0" />
+                    <span>⚡ ~{nearbyRain.toFixed(1)}mm</span>
+                  </div>
+                ) : null}
+              </div>
             </div>
           );
         })}

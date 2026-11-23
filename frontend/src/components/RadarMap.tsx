@@ -22,24 +22,24 @@ function MapViewController({ center, zoom }: { center: [number, number]; zoom: n
   return null;
 }
 
-// Sleek dark-mode glowing pin
+// Sleek discreet pin (subtle ring with translucent center so text remains readable)
 const cityMarkerIcon = L.divIcon({
   className: 'custom-radar-pin',
   html: `
-    <div style="position: relative; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;">
-      <div style="position: absolute; width: 20px; height: 20px; background: rgba(56, 189, 248, 0.35); border-radius: 50%; animation: ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
-      <div style="width: 12px; height: 12px; background: #38BDF8; border: 2.5px solid #0B1120; border-radius: 50%; box-shadow: 0 0 8px #38BDF8;"></div>
+    <div style="position: relative; width: 14px; height: 14px; display: flex; align-items: center; justify-content: center;">
+      <div style="position: absolute; width: 14px; height: 14px; background: rgba(56, 189, 248, 0.25); border-radius: 50%; animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
+      <div style="width: 8px; height: 8px; background: rgba(11, 17, 32, 0.7); border: 1.5px solid #38BDF8; border-radius: 50%; box-shadow: 0 0 6px rgba(56, 189, 248, 0.8);"></div>
     </div>
   `,
-  iconSize: [20, 20],
-  iconAnchor: [10, 10],
+  iconSize: [14, 14],
+  iconAnchor: [7, 7],
 });
 
 export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
   const [radarData, setRadarData] = useState<RadarResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
-  const [activeLayer, setActiveLayer] = useState<LayerMode>('radar');
+  const [activeLayer, setActiveLayer] = useState<LayerMode>('satellite');
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const animationTimerRef = useRef<number | null>(null);
@@ -53,9 +53,14 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
         const data = await fetchRadar();
         if (mounted) {
           setRadarData(data);
-          const pastFrames = data.radar?.past || [];
-          if (pastFrames.length > 0) {
-            setCurrentIndex(pastFrames.length - 1); // Set to latest radar frame
+          const satFrames = data.satellite?.infrared || [];
+          if (satFrames.length > 0) {
+            setCurrentIndex(satFrames.length - 1); // Set to latest satellite frame
+          } else {
+            const pastFrames = data.radar?.past || [];
+            if (pastFrames.length > 0) {
+              setCurrentIndex(pastFrames.length - 1);
+            }
           }
         }
       } catch (err: any) {
@@ -135,25 +140,6 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
     'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}';
   const esriDarkRefUrl =
     'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}';
-
-  // Active weather overlay tile URL
-  const activeTileUrl = useMemo(() => {
-    if (!currentFrame) return null;
-    if (activeLayer === 'radar') {
-      return radarData?.host && currentFrame.path
-        ? `${radarData.host}${currentFrame.path}/256/{z}/{x}/{y}/2/1_1.png`
-        : null;
-    } else {
-      // Satélite IR
-      if (radarData?.satellite?.tile_url_template && currentFrame.time_str) {
-        return radarData.satellite.tile_url_template.replace('{time}', currentFrame.time_str);
-      }
-      // Fallback
-      return radarData?.host && currentFrame.path
-        ? `${radarData.host}${currentFrame.path}/256/{z}/{x}/{y}/0/0_0.png`
-        : null;
-    }
-  }, [activeLayer, currentFrame, radarData]);
 
   const frameTimeStr = currentFrame?.time
     ? new Date(currentFrame.time * 1000).toLocaleTimeString('es-AR', {
@@ -252,17 +238,38 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
                 attribution='Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ'
               />
 
-              {/* 2. Active Animated Weather Layer (Radar or Infrared Satellite) (zIndex 10) */}
-              {activeTileUrl && (
-                <TileLayer
-                  key={`${activeLayer}-${currentFrame?.time_str || currentFrame?.path || 'frame'}`}
-                  url={activeTileUrl}
-                  opacity={activeLayer === 'radar' ? 0.72 : 0.65}
-                  maxNativeZoom={7}
-                  maxZoom={14}
-                  zIndex={10}
-                />
-              )}
+              {/* 2. Zero-flicker Animated Weather Layers (Radar or Infrared Satellite) (zIndex 10) */}
+              {allFrames.map((frame, idx) => {
+                let frameUrl: string | null = null;
+                if (activeLayer === 'radar') {
+                  frameUrl =
+                    radarData?.host && frame.path
+                      ? `${radarData.host}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`
+                      : null;
+                } else {
+                  if (radarData?.satellite?.tile_url_template && frame.time_str) {
+                    frameUrl = radarData.satellite.tile_url_template.replace('{time}', frame.time_str);
+                  } else if (radarData?.host && frame.path) {
+                    frameUrl = `${radarData.host}${frame.path}/256/{z}/{x}/{y}/0/0_0.png`;
+                  }
+                }
+                if (!frameUrl) return null;
+
+                const isActive = idx === currentIndex;
+                const targetOpacity = activeLayer === 'radar' ? 0.72 : 0.65;
+
+                return (
+                  <TileLayer
+                    key={`${activeLayer}-${frame.time_str || frame.path || idx}`}
+                    url={frameUrl}
+                    opacity={isActive ? targetOpacity : 0}
+                    maxNativeZoom={7}
+                    maxZoom={14}
+                    keepBuffer={4}
+                    zIndex={10}
+                  />
+                );
+              })}
 
               {/* 3. Esri Reference Overlay (Cities, borders & roads on top, zIndex 20) */}
               <TileLayer
@@ -394,10 +401,10 @@ export const RadarMap: React.FC<RadarMapProps> = ({ lat, lon, cityName }) => {
                 <div className="flex items-center justify-between text-[10px] text-slate-400 px-1">
                   <span className="text-indigo-300 font-semibold flex items-center gap-1">
                     <Radio className="w-3 h-3 text-indigo-400" />
-                    GOES-19 Band 13 (Clean IR)
+                    GOES-19 Band 13 (IR Gradiente)
                   </span>
                   <span className="text-slate-300">
-                    Topes nubosos en tiempo real (cobertura total Córdoba)
+                    Topes nubosos y tormentas en tiempo real
                   </span>
                 </div>
               )}

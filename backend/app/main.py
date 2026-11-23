@@ -31,7 +31,7 @@ from .services.telegram_service import format_test_message, send_telegram_alert
 from .services.alerts_service import check_and_dispatch_cron
 
 RAINVIEWER_MAPS_URL = "https://api.rainviewer.com/public/weather-maps.json"
-REALEARTH_TIMES_URL = "https://realearth.ssec.wisc.edu/api/times?products=G19-ABI-FD-BAND13"
+REALEARTH_TIMES_URL = "https://realearth.ssec.wisc.edu/api/times?products=G19-ABI-FD-BAND13-GRAD"
 
 
 @asynccontextmanager
@@ -228,12 +228,12 @@ async def get_radar():
             else:
                 raise HTTPException(status_code=502, detail="No response from RainViewer")
 
-            # Parse GOES-19 Infrared satellite frames from SSEC RealEarth
+            # Parse GOES-19 Infrared satellite frames from SSEC RealEarth (enhanced gradient)
             sat_frames = []
             if isinstance(re_res, httpx.Response) and re_res.status_code == 200:
                 try:
                     re_json = re_res.json()
-                    re_times = re_json.get("G19-ABI-FD-BAND13", [])
+                    re_times = re_json.get("G19-ABI-FD-BAND13-GRAD", []) or re_json.get("G19-ABI-FD-BAND13", [])
                     # Take up to last 12 frames (spanning ~2 hours of real satellite imagery)
                     selected_times = re_times[-12:] if len(re_times) >= 12 else re_times
                     for t_str in selected_times:
@@ -245,7 +245,7 @@ async def get_radar():
                         sat_frames.append({
                             "time": u_ts,
                             "time_str": t_str,
-                            "path": f"/tiles/G19-ABI-FD-BAND13/{t_str}",
+                            "path": f"/tiles/G19-ABI-FD-BAND13-GRAD/{t_str}",
                         })
                 except Exception:
                     pass
@@ -255,9 +255,9 @@ async def get_radar():
             if not rv_existing_sat and sat_frames:
                 data["satellite"] = {
                     "provider": "realearth_goes19",
-                    "product": "G19-ABI-FD-BAND13",
-                    "name": "GOES-19 Full Disk Band 13 (Clean IR)",
-                    "tile_url_template": "https://realearth.ssec.wisc.edu/tiles/G19-ABI-FD-BAND13/{z}/{x}/{y}.png?time={time}",
+                    "product": "G19-ABI-FD-BAND13-GRAD",
+                    "name": "GOES-19 Band 13 (IR Gradiente)",
+                    "tile_url_template": "https://realearth.ssec.wisc.edu/tiles/G19-ABI-FD-BAND13-GRAD/{z}/{x}/{y}.png?time={time}",
                     "max_native_zoom": 7,
                     "infrared": sat_frames,
                 }

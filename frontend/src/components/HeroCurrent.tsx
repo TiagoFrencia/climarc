@@ -148,9 +148,9 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
                   ? `${Math.round(current.relative_humidity_pct)}%`
                   : '--%'}
               </div>
-              <div className="text-[10px] text-slate-400 truncate">
+              <div className="text-[10px] text-slate-300 leading-tight">
                 {current.dew_point_c !== null && current.dew_point_c !== undefined
-                  ? `Rocío: ${Math.round(current.dew_point_c)}°C (${getComfortLabel(current.dew_point_c)})`
+                  ? `Rocío ${Math.round(current.dew_point_c)}° · ${getComfortLabel(current.dew_point_c)}`
                   : 'Punto de rocío'}
               </div>
             </div>
@@ -194,17 +194,17 @@ export const HeroCurrent: React.FC<HeroCurrentProps> = ({
                   '0 mm'
                 )}
               </div>
-              <div className="text-[10px] text-slate-400 truncate">
+              <div className="text-[10px] text-slate-400">
                 {isPrecipNow ? (
                   maxPrecipMm > 0 ? (
                     <span className="text-sky-400 font-medium">Lloviendo ahora</span>
                   ) : current.metar_wx_raw ? (
                     `Reporte: ${current.metar_wx_raw}`
                   ) : (
-                    'Detectado en estación'
+                    'Detectado en pista'
                   )
                 ) : (
-                  `Probabilidad: ${precipProb}%`
+                  `Prob: ${precipProb}%`
                 )}
               </div>
             </div>

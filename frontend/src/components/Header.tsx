@@ -33,7 +33,11 @@ export const Header: React.FC<HeaderProps> = ({
   const ageMinutes = currentWeather?.metar_age_minutes;
 
   return (
-    <header className="sticky top-0 z-30 bg-[#0B1120]/90 backdrop-blur-md border-b border-slate-800/80 px-4 py-3 transition-colors">
+    <header className="sticky top-0 z-30 bg-[#0B1120]/90 backdrop-blur-md border-b border-slate-800/80 px-4 py-3 transition-colors relative">
+      {/* Subtle top progress bar during background refresh */}
+      {isLoading && currentWeather && (
+        <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-sky-400 via-indigo-500 to-sky-400 animate-pulse z-50" />
+      )}
       <div className="max-w-md mx-auto flex flex-col gap-2.5">
         {/* Top row: Brand + Action buttons */}
         <div className="flex items-center justify-between">
@@ -125,35 +129,46 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Data Source Truth Pill */}
         <div className="flex items-center justify-between px-1">
-          <div className="flex items-center gap-1.5">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                isNowcast ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
-              }`}
-            />
-            {isNowcast ? (
-              <span className="text-[11px] font-medium text-emerald-400">
-                {stationName} en vivo · {formatAgeMinutes(ageMinutes)}
-              </span>
-            ) : (
+          {isLoading && !currentWeather ? (
+            <div className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-slate-500 animate-pulse" />
               <span className="text-[11px] font-medium text-slate-400">
-                Ensamble + IA ({stationName} {formatAgeMinutes(ageMinutes)})
+                Conectando con {stationName}...
               </span>
-            )}
-          </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    isNowcast ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                  }`}
+                />
+                {isNowcast ? (
+                  <span className="text-[11px] font-medium text-emerald-400">
+                    {stationName} en vivo · {formatAgeMinutes(ageMinutes)}
+                  </span>
+                ) : (
+                  <span className="text-[11px] font-medium text-slate-400">
+                    Ensamble + IA ({stationName} {formatAgeMinutes(ageMinutes)})
+                  </span>
+                )}
+              </div>
 
-          {currentWeather?.confidence && (
-            <span
-              className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                currentWeather.confidence === 'alta'
-                  ? 'bg-emerald-950/60 text-emerald-300 border-emerald-800/60'
-                  : currentWeather.confidence === 'media'
-                  ? 'bg-amber-950/60 text-amber-300 border-amber-800/60'
-                  : 'bg-rose-950/60 text-rose-300 border-rose-800/60'
-              }`}
-            >
-              Confianza {currentWeather.confidence.toUpperCase()}
-            </span>
+              {currentWeather?.confidence && (
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                    currentWeather.confidence === 'alta'
+                      ? 'bg-emerald-950/60 text-emerald-300 border-emerald-800/60'
+                      : currentWeather.confidence === 'media'
+                      ? 'bg-amber-950/60 text-amber-300 border-amber-800/60'
+                      : 'bg-rose-950/60 text-rose-300 border-rose-800/60'
+                  }`}
+                >
+                  Confianza {currentWeather.confidence.toUpperCase()}
+                </span>
+              )}
+            </>
           )}
         </div>
       </div>
