@@ -42,6 +42,45 @@ def test_api_weather_endpoint():
     assert "confidence" in data
     assert "wrf_available" in data
 
+    # ClimaRC v2.1 fields verification
+    assert "summary_one_liner" in data
+    assert isinstance(data["summary_one_liner"], str)
+    assert len(data["summary_one_liner"]) <= 120
+
+    assert "sentinels" in data
+    assert isinstance(data["sentinels"], list)
+    assert len(data["sentinels"]) == 4
+    sentinel_icaos = [s["icao"] for s in data["sentinels"]]
+    assert set(sentinel_icaos) == {"SAOC", "SACO", "SAOR", "SAOL"}
+
+    assert "sentinel_front" in data
+    assert "detected" in data["sentinel_front"]
+
+    assert "hail_risk" in data
+    hail = data["hail_risk"]
+    assert "level" in hail
+    assert hail["level"] in ("sin_riesgo", "moderado", "alto", "extremo")
+    assert "score" in hail
+    assert "peak_window_local" in hail
+    assert "cape_max" in hail
+    assert "shear_0_6km_kmh" in hail
+    assert "freezing_level_m" in hail
+    assert "goes_severe_core_detected" in hail
+    assert "sentinel_hail_detected" in hail
+    assert "explanation" in hail
+
+    # Current block v2.1 fields
+    curr = data["current"]
+    assert "qnh_trend" in curr
+    assert curr["qnh_trend"] in ("subiendo", "bajando", "bajando_rapido", "estable")
+    assert "qnh_delta_3h_hpa" in curr
+    assert "uv_index" in curr
+
+    # Daily v2.1 fields
+    d0 = data["daily"][0]
+    assert "sunrise_local" in d0
+    assert "sunset_local" in d0
+
     # Verify hourly contains models_comparison and wrf_nearby_precip_max_mm
     h0 = data["hourly"][0]
     assert "temperature_c" in h0
@@ -56,6 +95,9 @@ def test_api_radar_endpoint():
     assert "radar" in data or "host" in data
     assert "satellite" in data
     assert "infrared" in data["satellite"]
+    if "lightning" in data:
+        assert data["lightning"]["provider"] == "realearth_glm"
+        assert "tile_url_template" in data["lightning"]
 
 
 def test_api_accuracy_endpoint():

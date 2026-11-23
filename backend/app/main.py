@@ -28,12 +28,15 @@ from .services.open_meteo_service import fetch_open_meteo_forecast
 from .services.wrf_reader_service import read_wrf_forecast
 from .services.smn_alerts_service import fetch_smn_alerts
 from .services.local_alerts_detector import detect_local_alerts
-from .services.ensemble_engine import generate_ensemble_forecast
+from .services.ensemble_engine import generate_ensemble_forecast, generate_executive_summary
+from .services.sentinel_service import get_sentinels_summary, detect_approaching_front
+from .services.hail_service import evaluate_hail_risk
 from .services.telegram_service import format_test_message, send_telegram_alert
 from .services.alerts_service import check_and_dispatch_cron
 
 RAINVIEWER_MAPS_URL = "https://api.rainviewer.com/public/weather-maps.json"
 REALEARTH_TIMES_URL = "https://realearth.ssec.wisc.edu/api/times?products=G19-ABI-FD-BAND13-GRAD"
+REALEARTH_GLM_TIMES_URL = "https://realearth.ssec.wisc.edu/api/times?products=glmgroupdensity"
 
 
 async def periodic_alerts_checker():
@@ -155,11 +158,11 @@ async def get_weather(
 
     # Fetch live sources
     async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
-        # Metar for city airport
-        metar_map = await fetch_metar_observations(station_ids=[city_cfg.icao], client=client)
+        # Metar for all 4 sentinel stations in single HTTP call (SAOC, SACO, SAOR, SAOL)
+        metar_map = await fetch_metar_observations(client=client)
         metar_obs = metar_map.get(city_cfg.icao)
 
-        # Open-Meteo multi-model
+        # Open-Meteo multi-model (including AIFS, 500hPa shear, freezing level, UV & solar times)
         open_meteo_res = await fetch_open_meteo_forecast(lat=city_cfg.lat, lon=city_cfg.lon, client=client)
 
         # WRF cached or local
@@ -167,6 +170,13 @@ async def get_weather(
 
         # SMN official alerts (graceful)
         smn_alerts_res = await fetch_smn_alerts(client=client)
+
+        # Two-stage hail evaluation (Atmospheric potential + GOES-19 live core scan)
+        hail_risk = await evaluate_hail_risk(open_meteo_res, wrf_res, metar_map, client=client)
+
+    # Sentinel stations summary and front detection
+    sentinels = get_sentinels_summary(metar_map)
+    sentinel_front = detect_approaching_front(metar_map)
 
     # Metar history for pressure trend
     metar_history = get_metar_history(city_cfg.icao, hours=6)
@@ -192,6 +202,16 @@ async def get_weather(
         max_hourly_steps=72,
         lat=city_cfg.lat,
         lon=city_cfg.lon,
+        metar_history_records=metar_history,
+    )
+
+    # Executive 1-liner summary
+    summary_one_liner = generate_executive_summary(
+        current=ensemble["current"],
+        hourly=ensemble["hourly"],
+        daily=ensemble["daily"],
+        hail_risk=hail_risk,
+        sentinel_front=sentinel_front,
     )
 
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -199,9 +219,13 @@ async def get_weather(
     payload = {
         "city": city_cfg.to_dict(),
         "updated_at_utc": now_utc,
+        "summary_one_liner": summary_one_liner,
         "current": ensemble["current"],
         "hourly": ensemble["hourly"],
         "daily": ensemble["daily"],
+        "sentinels": sentinels,
+        "sentinel_front": sentinel_front,
+        "hail_risk": hail_risk,
         "alerts": all_alerts,
         "models_active": ensemble["models_active"],
         "confidence": ensemble["overall_confidence"],
@@ -234,7 +258,8 @@ async def get_radar():
         async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
             rv_task = client.get(RAINVIEWER_MAPS_URL, headers=headers)
             re_task = client.get(REALEARTH_TIMES_URL, headers=headers)
-            rv_res, re_res = await asyncio.gather(rv_task, re_task, return_exceptions=True)
+            glm_task = client.get(REALEARTH_GLM_TIMES_URL, headers=headers)
+            rv_res, re_res, glm_res = await asyncio.gather(rv_task, re_task, glm_task, return_exceptions=True)
 
             if isinstance(rv_res, httpx.Response) and rv_res.status_code == 200:
                 data = rv_res.json()
@@ -264,6 +289,37 @@ async def get_radar():
                             "time_str": t_str,
                             "path": f"/tiles/G19-ABI-FD-BAND13-GRAD/{t_str}",
                         })
+                except Exception:
+                    pass
+
+            # Parse GLM lightning activity frames from SSEC RealEarth
+            if isinstance(glm_res, httpx.Response) and glm_res.status_code == 200:
+                try:
+                    glm_json = glm_res.json()
+                    glm_times = glm_json.get("glmgroupdensity", [])
+                    selected_glm = glm_times[-12:] if len(glm_times) >= 12 else glm_times
+                    glm_frames = []
+                    for t_str in selected_glm:
+                        try:
+                            dt = datetime.strptime(t_str, "%Y%m%d.%H%M%S").replace(tzinfo=timezone.utc)
+                            u_ts = int(dt.timestamp())
+                        except Exception:
+                            u_ts = int(time.time())
+                        glm_frames.append({
+                            "time": u_ts,
+                            "time_str": t_str,
+                            "path": f"/tiles/glmgroupdensity/{t_str}",
+                        })
+                    if glm_frames:
+                        data["lightning"] = {
+                            "provider": "realearth_glm",
+                            "product": "glmgroupdensity",
+                            "name": "Actividad de Rayos GLM (GOES-East)",
+                            "tile_url_template": "https://realearth.ssec.wisc.edu/tiles/glmgroupdensity/{z}/{x}/{y}.png?time={time}",
+                            "max_native_zoom": 7,
+                            "latest_time": glm_times[-1] if glm_times else None,
+                            "frames": glm_frames,
+                        }
                 except Exception:
                     pass
 

@@ -5,6 +5,9 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from ..database import save_forecast_snapshots
 from .ml_corrector import ml_corrector
+from .metar_service import calculate_qnh_trend
+
+CORDOBA_TZ = timezone(timedelta(hours=-3))
 
 
 def calculate_dew_point(temp_c: Optional[float], rh_pct: Optional[float]) -> Optional[float]:
@@ -31,13 +34,8 @@ def calculate_dew_point(temp_c: Optional[float], rh_pct: Optional[float]) -> Opt
 
 def calculate_apparent_temperature(temp_c: float, rh_pct: Optional[float], wind_kmh: float) -> float:
     """
-    Computes apparent temperature (°C) using Steadman's physical formula
-    (Bureau of Meteorology standard):
+    Computes apparent temperature (°C) using Steadman's physical formula:
     AT = T + 0.33 * e - 0.70 * v - 4.00
-    where:
-      T = Dry bulb temperature (°C)
-      e = Water vapor pressure (hPa) = (rh / 100) * 6.105 * exp((17.27 * T) / (237.7 + T))
-      v = Wind speed at 10m (m/s) = wind_kmh / 3.6
     """
     try:
         rh = rh_pct if rh_pct is not None else 50.0
@@ -93,22 +91,19 @@ def parse_metar_phenomenon(metar_data: Optional[Dict[str, Any]]) -> Tuple[Option
 
     metar_wx_raw = wx_str if wx_str else " ".join(sorted(tokens))
 
-    # Check if precipitating (RA, DZ, TSRA, SHRA, GR, GS, SN, SG, PL)
+    # Check if precipitating
     precip_patterns = ("RA", "DZ", "TSRA", "SHRA", "GR", "GS", "SN", "SG", "PL")
     is_precip = any(any(p in t for p in precip_patterns) for t in tokens)
 
-    # WMO hierarchy:
-    # WMO 99: Tormenta con granizo (EXCLUSIVAMENTE si contiene GR o GS)
+    # WMO hierarchy
     has_hail = (
         any("GR" in t or "GS" in t for t in tokens)
         or bool(re.search(r"\b(GR|GS|TSGR|\+TSGR)\b", raw))
     )
-    # WMO 96: Tormenta fuerte (+TSRA / +TS sin granizo)
     has_heavy_ts = (
         any(t in ("+TSRA", "+TS") or "+TS" in t for t in tokens)
         or bool(re.search(r"\b\+TS(RA)?\b", raw))
     )
-    # WMO 95: Tormenta eléctrica moderada/estándar
     has_ts = (
         any("TS" in t for t in tokens)
         or bool(re.search(r"\b(TS|TSRA|VCTS|-TSRA|-TS)\b", raw))
@@ -143,16 +138,19 @@ def generate_ensemble_forecast(
     lat: Optional[float] = None,
     lon: Optional[float] = None,
     enable_ml: bool = True,
+    metar_history_records: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Blends multi-model numerical forecasts:
-    - 0-48h with fresh WRF: WRF-SMN 35%, ECMWF 35%, ICON 15%, GFS 15%
-    - Without WRF (or >48h): ECMWF 55%, ICON 25%, GFS 20%
-    - Nowcast blending at t+0 (70% METAR / 30% ensemble) and t+1 (35% METAR / 65% ensemble)
-      if METAR is < 90 min old.
-    - Confidence index ('alta', 'media', 'baja') from temperature std-dev and precipitation spread.
-    - Generates 72h hourly forecast and 7-day daily forecast.
-    - Automatically records snapshot in forecast_snapshots for accuracy auditing.
+    - If ECMWF AIFS 0.25 (AI) has non-null data:
+        * 0-48h with fresh WRF: WRF 30%, ECMWF IFS 28%, ECMWF AIFS 15%, ICON 14%, GFS 13%
+        * Without WRF (or >48h): ECMWF IFS 40%, ECMWF AIFS 22%, ICON 20%, GFS 18%
+    - If ECMWF AIFS 0.25 is null/unavailable (graceful fallback):
+        * 0-48h with fresh WRF: WRF 35%, ECMWF IFS 35%, ICON 15%, GFS 15%
+        * Without WRF (or >48h): ECMWF IFS 55%, ICON 25%, GFS 20%
+    - Nowcast blending at t+0 (70% METAR / 30% ensemble) and t+1 (35% METAR / 65% ensemble) if METAR is < 90 min.
+    - Calculates QNH barometric tendency and delta over the last 3 hours.
+    - Incorporates UV index, sunrise and sunset local times.
     """
     now = reference_time or datetime.now(timezone.utc)
     current_hour_prefix = now.strftime("%Y-%m-%dT%H:00:00Z")
@@ -160,7 +158,7 @@ def generate_ensemble_forecast(
     om_hourly = open_meteo_data.get("hourly", [])
     om_daily = open_meteo_data.get("daily", [])
 
-    # Find starting index in Open-Meteo corresponding to current hour or latest past hour
+    # Find starting index in Open-Meteo corresponding to current hour
     start_idx = 0
     found = False
     for idx, h in enumerate(om_hourly):
@@ -186,6 +184,12 @@ def generate_ensemble_forecast(
         if age_m is not None and age_m <= 90.0:
             metar_fresh = True
 
+    # Detect if ECMWF AIFS 0.25 is active with valid numeric data
+    aifs_active = any(
+        om_item.get("models", {}).get("ecmwf_aifs025", {}).get("temperature_c") is not None
+        for om_item in candidate_om_hourly[:24]
+    )
+
     blended_hourly: List[Dict[str, Any]] = []
     snapshots_to_save: List[Dict[str, Any]] = []
     models_active_set = set()
@@ -197,14 +201,22 @@ def generate_ensemble_forecast(
         models_om_pre = om_item.get("models", {})
         wrf_item_pre = wrf_map.get(t_utc_pre)
         use_wrf_pre = wrf_available and (wrf_item_pre is not None)
-        w_dict = {"wrf": 0.35, "ecmwf": 0.35, "icon": 0.15, "gfs": 0.15} if use_wrf_pre else {"ecmwf": 0.55, "icon": 0.25, "gfs": 0.20}
+
+        if aifs_active:
+            w_dict = {"wrf": 0.30, "ecmwf": 0.28, "aifs": 0.15, "icon": 0.14, "gfs": 0.13} if use_wrf_pre else {"ecmwf": 0.40, "aifs": 0.22, "icon": 0.20, "gfs": 0.18}
+        else:
+            w_dict = {"wrf": 0.35, "ecmwf": 0.35, "icon": 0.15, "gfs": 0.15} if use_wrf_pre else {"ecmwf": 0.55, "icon": 0.25, "gfs": 0.20}
+
         t_dict = {
             "ecmwf": models_om_pre.get("ecmwf_ifs025", {}).get("temperature_c"),
             "icon": models_om_pre.get("icon_seamless", {}).get("temperature_c"),
             "gfs": models_om_pre.get("gfs_seamless", {}).get("temperature_c"),
         }
+        if aifs_active:
+            t_dict["aifs"] = models_om_pre.get("ecmwf_aifs025", {}).get("temperature_c")
         if use_wrf_pre and wrf_item_pre:
             t_dict["wrf"] = wrf_item_pre.get("temperature_c")
+
         raw_temps_series.append(_weighted_mean(t_dict, w_dict))
 
     for step_idx, om_item in enumerate(candidate_om_hourly):
@@ -215,15 +227,24 @@ def generate_ensemble_forecast(
         m_ecmwf = models_om.get("ecmwf_ifs025", {})
         m_icon = models_om.get("icon_seamless", {})
         m_gfs = models_om.get("gfs_seamless", {})
+        m_aifs = models_om.get("ecmwf_aifs025", {})
         wrf_item = wrf_map.get(t_utc)
 
         # Decide weights
         use_wrf = wrf_available and (wrf_item is not None)
-        if use_wrf:
-            weights = {"wrf": 0.35, "ecmwf": 0.35, "icon": 0.15, "gfs": 0.15}
-            models_active_set.add("wrf_smn")
+        if aifs_active and m_aifs.get("temperature_c") is not None:
+            if use_wrf:
+                weights = {"wrf": 0.30, "ecmwf": 0.28, "aifs": 0.15, "icon": 0.14, "gfs": 0.13}
+                models_active_set.add("wrf_smn")
+            else:
+                weights = {"ecmwf": 0.40, "aifs": 0.22, "icon": 0.20, "gfs": 0.18}
+            models_active_set.add("ecmwf_aifs025")
         else:
-            weights = {"ecmwf": 0.55, "icon": 0.25, "gfs": 0.20}
+            if use_wrf:
+                weights = {"wrf": 0.35, "ecmwf": 0.35, "icon": 0.15, "gfs": 0.15}
+                models_active_set.add("wrf_smn")
+            else:
+                weights = {"ecmwf": 0.55, "icon": 0.25, "gfs": 0.20}
 
         models_active_set.update(["ecmwf_ifs025", "icon_seamless", "gfs_seamless"])
 
@@ -233,6 +254,8 @@ def generate_ensemble_forecast(
             "icon": m_icon.get("temperature_c"),
             "gfs": m_gfs.get("temperature_c"),
         }
+        if aifs_active and m_aifs.get("temperature_c") is not None:
+            temps["aifs"] = m_aifs.get("temperature_c")
         if use_wrf and wrf_item:
             temps["wrf"] = wrf_item.get("temperature_c")
 
@@ -242,6 +265,8 @@ def generate_ensemble_forecast(
             "icon": m_icon.get("precip_mm") or 0.0,
             "gfs": m_gfs.get("precip_mm") or 0.0,
         }
+        if aifs_active and m_aifs.get("precip_mm") is not None:
+            precips["aifs"] = m_aifs.get("precip_mm") or 0.0
         if use_wrf and wrf_item:
             precips["wrf"] = wrf_item.get("precip_mm") or 0.0
 
@@ -251,6 +276,8 @@ def generate_ensemble_forecast(
             "icon": m_icon.get("wind_speed_kmh"),
             "gfs": m_gfs.get("wind_speed_kmh"),
         }
+        if aifs_active and m_aifs.get("wind_speed_kmh") is not None:
+            winds["aifs"] = m_aifs.get("wind_speed_kmh")
         if use_wrf and wrf_item:
             winds["wrf"] = wrf_item.get("wind_speed_kmh")
 
@@ -276,8 +303,7 @@ def generate_ensemble_forecast(
             rhs["wrf"] = wrf_item.get("relative_humidity_pct")
         ens_rh = _weighted_mean(rhs, weights)
 
-        # Standardized Sea Level Pressure (QNH / pressure_msl, ~1010 hPa)
-        # Note: WRF PSFC is station pressure (~958 hPa); NEVER mix station pressure with sea level QNH!
+        # Standardized Sea Level Pressure (QNH / pressure_msl)
         msl_pressures = {
             "ecmwf": m_ecmwf.get("pressure_msl_hpa") if m_ecmwf.get("pressure_msl_hpa") is not None else m_ecmwf.get("surface_pressure_hpa"),
             "icon": m_icon.get("pressure_msl_hpa") if m_icon.get("pressure_msl_hpa") is not None else m_icon.get("surface_pressure_hpa"),
@@ -318,8 +344,7 @@ def generate_ensemble_forecast(
         valid_probs = [p for p in probs if p is not None]
         ens_prob = max(valid_probs) if valid_probs else 0.0
 
-        # Physical coherence: if all active models forecast < 0.1 mm and WRF nearby core < 0.5 mm,
-        # attenuate precip_prob_pct with a maximum cap of 35% (avoid phantom 85%+ rain with 0.0 mm)
+        # Physical coherence: cap precip probability if no rain predicted
         valid_precip_vals = [v for v in precips.values() if v is not None]
         max_model_precip = max(valid_precip_vals) if valid_precip_vals else 0.0
         wrf_nearby_val = wrf_item.get("precip_nearby_max_mm") if wrf_item else 0.0
@@ -340,7 +365,6 @@ def generate_ensemble_forecast(
         else:
             std_t = 0.0
 
-        valid_precip_vals = [v for v in precips.values() if v is not None]
         precip_spread = (max(valid_precip_vals) - min(valid_precip_vals)) if valid_precip_vals else 0.0
 
         if std_t < 1.0 and precip_spread < 1.0:
@@ -386,7 +410,6 @@ def generate_ensemble_forecast(
             m_rh = metar_data.get("humidity_pct")
 
             if step_idx == 0:
-                # 70% METAR / 30% ensemble
                 if m_temp is not None:
                     final_temp = round(0.70 * m_temp + 0.30 * ens_temp_adj, 1)
                     nowcast_blended = True
@@ -395,7 +418,6 @@ def generate_ensemble_forecast(
                 if m_rh is not None and final_rh is not None:
                     final_rh = round(0.70 * m_rh + 0.30 * final_rh, 1)
             elif step_idx == 1:
-                # 35% METAR / 65% ensemble
                 if m_temp is not None:
                     final_temp = round(0.35 * m_temp + 0.65 * ens_temp_adj, 1)
                     nowcast_blended = True
@@ -422,6 +444,12 @@ def generate_ensemble_forecast(
                 "wind_speed_kmh": m_gfs.get("wind_speed_kmh"),
             },
         }
+        if m_aifs:
+            models_comp["aifs"] = {
+                "temperature_c": m_aifs.get("temperature_c"),
+                "precip_mm": m_aifs.get("precip_mm"),
+                "wind_speed_kmh": m_aifs.get("wind_speed_kmh"),
+            }
         if wrf_item:
             models_comp["wrf"] = {
                 "temperature_c": wrf_item.get("temperature_c"),
@@ -431,9 +459,10 @@ def generate_ensemble_forecast(
             }
 
         wrf_nearby_p = wrf_item.get("precip_nearby_max_mm") if wrf_item else None
-
-        # Standard Steadman physical apparent temperature
         phys_app_t = calculate_apparent_temperature(final_temp, final_rh, final_wind)
+
+        # UV index from hourly data
+        uv_idx = om_item.get("uv_index", 0.0)
 
         hourly_record = {
             "lead_hour": step_idx,
@@ -450,6 +479,10 @@ def generate_ensemble_forecast(
             "surface_pressure_hpa": final_pressure,
             "weather_code": weather_code,
             "cape_jkg": round(ens_cape, 0),
+            "uv_index": round(uv_idx, 1) if uv_idx is not None else 0.0,
+            "wind_speed_500hPa_kmh": om_item.get("wind_speed_500hPa_kmh"),
+            "wind_direction_500hPa_deg": om_item.get("wind_direction_500hPa_deg"),
+            "freezing_level_height_m": om_item.get("freezing_level_height_m"),
             "confidence": confidence,
             "temp_std_dev": round(std_t, 2),
             "nowcast_blended": nowcast_blended,
@@ -463,7 +496,6 @@ def generate_ensemble_forecast(
         }
         blended_hourly.append(hourly_record)
 
-        # Snapshot saving for first 3 hours
         if step_idx < 3:
             snapshots_to_save.append({
                 "target_time_utc": t_utc,
@@ -473,16 +505,28 @@ def generate_ensemble_forecast(
                 "model_source": "ensemble",
             })
 
-    # Save snapshots into SQLite for accuracy auditor
     if snapshots_to_save:
         try:
             save_forecast_snapshots(city=city_key, snapshots=snapshots_to_save)
         except Exception:
             pass
 
-    # Blend 7-day daily forecast (ECMWF 55%, ICON 25%, GFS 20%)
+    # Blend 7-day daily forecast
     daily_weights = {"ecmwf_ifs025": 0.55, "icon_seamless": 0.25, "gfs_seamless": 0.20}
     blended_daily: List[Dict[str, Any]] = []
+
+    def _to_local_time_str(iso_val: Optional[str]) -> Optional[str]:
+        if not iso_val:
+            return None
+        try:
+            clean_str = iso_val.replace("Z", "")
+            dt_val = datetime.fromisoformat(clean_str)
+            if dt_val.tzinfo is None:
+                dt_val = dt_val.replace(tzinfo=timezone.utc)
+            dt_local = dt_val.astimezone(CORDOBA_TZ)
+            return dt_local.strftime("%H:%M")
+        except Exception:
+            return iso_val[-5:] if len(iso_val) >= 5 else iso_val
 
     for d_idx, d_item in enumerate(om_daily):
         d_date = d_item["date"]
@@ -506,16 +550,14 @@ def generate_ensemble_forecast(
         max_t = round(_weighted_mean(max_temps, daily_weights), 1)
         min_t = round(_weighted_mean(min_temps, daily_weights), 1)
 
-        # Coherencia de min/max para daily[0] (Hoy) y daily[1] (Mañana) con el ensamble horario fusionado
+        # Min/max daily coherence with hourly steps
         if d_idx in (0, 1) and blended_hourly:
             matching_hours = []
             for h in blended_hourly:
                 t_str = h.get("timestamp_utc")
                 if t_str:
                     try:
-                        dt_h = datetime.fromisoformat(t_str.replace("Z", "+00:00")).astimezone(
-                            timezone(timedelta(hours=-3))
-                        )
+                        dt_h = datetime.fromisoformat(t_str.replace("Z", "+00:00")).astimezone(CORDOBA_TZ)
                         if dt_h.strftime("%Y-%m-%d") == d_date:
                             matching_hours.append(h)
                     except Exception:
@@ -526,7 +568,6 @@ def generate_ensemble_forecast(
                 max_t = round(max(h_temps), 1)
                 min_t = round(min(h_temps), 1)
 
-            # Para Hoy (daily[0]): coherencia estricta con current.temperature_c y METAR de pista
             if d_idx == 0:
                 curr_temp = blended_hourly[0]["temperature_c"]
                 min_t = round(min(min_t, curr_temp), 1)
@@ -539,9 +580,12 @@ def generate_ensemble_forecast(
                     except (ValueError, TypeError):
                         pass
 
-        # FIX 4.2: Normalizar weather_code si precip_prob_pct < 15 y precip_sum_mm < 0.2 y w_code >= 51
         if p_prob < 15 and p_sum < 0.2 and w_code >= 51:
             w_code = 3
+
+        sunrise_loc = _to_local_time_str(d_item.get("sunrise"))
+        sunset_loc = _to_local_time_str(d_item.get("sunset"))
+        uv_max = d_item.get("uv_index_max")
 
         blended_daily.append({
             "date": d_date,
@@ -551,6 +595,9 @@ def generate_ensemble_forecast(
             "precipitation_probability_max_pct": p_prob,
             "wind_speed_max_kmh": round(_weighted_mean(winds_max, daily_weights), 1),
             "weather_code": w_code,
+            "sunrise_local": sunrise_loc,
+            "sunset_local": sunset_loc,
+            "uv_index_max": round(uv_max, 1) if uv_max is not None else None,
         })
 
     # Build Current weather block
@@ -558,7 +605,6 @@ def generate_ensemble_forecast(
     if blended_hourly:
         h0 = blended_hourly[0]
 
-        # FIX 3: Dew point from METAR when fresh or via Magnus-Tetens
         dew_point_c = None
         if metar_fresh and metar_data and metar_data.get("dewp_c") is not None:
             try:
@@ -568,27 +614,33 @@ def generate_ensemble_forecast(
         else:
             dew_point_c = calculate_dew_point(h0["temperature_c"], h0["relative_humidity_pct"])
 
-        # FIX 1: METAR weather code override & real precipitation detection
         metar_w_code = None
         metar_wx_raw = None
         metar_is_precip = False
         if metar_fresh and metar_data:
             metar_w_code, metar_wx_raw, metar_is_precip = parse_metar_phenomenon(metar_data)
 
-        # If METAR has active phenomenon, override current and hourly[0] weather_code
         if metar_w_code is not None:
             h0["weather_code"] = metar_w_code
 
-        # Is precipitating now flag
         is_precipitating_now = metar_is_precip or (h0.get("precip_mm", 0.0) >= 0.1)
 
-        # Physical Steadman apparent temperature for current and h0
         current_app_temp = calculate_apparent_temperature(
             h0["temperature_c"],
             h0["relative_humidity_pct"],
             h0["wind_speed_kmh"],
         )
         h0["apparent_temperature_c"] = current_app_temp
+
+        # QNH barometric tendency calculation (last 3 hours)
+        qnh_trend, qnh_delta = calculate_qnh_trend(
+            icao=metar_data.get("icao", "SAOC") if metar_data else "SAOC",
+            current_qnh=metar_data.get("qnh_hpa") if metar_data else h0.get("pressure_hpa"),
+            history_records=metar_history_records,
+        )
+
+        today_sunrise = blended_daily[0].get("sunrise_local") if blended_daily else None
+        today_sunset = blended_daily[0].get("sunset_local") if blended_daily else None
 
         current_block = {
             "timestamp_utc": h0["timestamp_utc"],
@@ -602,6 +654,11 @@ def generate_ensemble_forecast(
             "pressure_hpa": h0["pressure_hpa"],
             "surface_pressure_hpa": h0["surface_pressure_hpa"],
             "weather_code": h0["weather_code"],
+            "uv_index": h0.get("uv_index", 0.0),
+            "sunrise_local": today_sunrise,
+            "sunset_local": today_sunset,
+            "qnh_trend": qnh_trend,
+            "qnh_delta_3h_hpa": qnh_delta,
             "nowcast_blended": h0["nowcast_blended"],
             "confidence": h0["confidence"],
             "raw_ensemble_temp_c": h0["raw_ensemble_temp_c"],
@@ -624,6 +681,110 @@ def generate_ensemble_forecast(
         "overall_confidence": blended_hourly[0]["confidence"] if blended_hourly else "media",
         "ml_metadata": ml_corrector.get_metadata(),
     }
+
+
+def generate_executive_summary(
+    current: Dict[str, Any],
+    hourly: List[Dict[str, Any]],
+    daily: List[Dict[str, Any]],
+    hail_risk: Optional[Dict[str, Any]] = None,
+    sentinel_front: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Generates a deterministic 1-liner executive forecast summary in natural Argentine Spanish.
+    Strictly capped at 120 characters, 0 ms latency, no external LLM.
+    """
+    # 1. Imminent hail alert
+    if hail_risk and hail_risk.get("imminent_hail_alert"):
+        summary = "Alerta por granizo inminente: resguardar vehículos. Tormenta severa con ráfagas."
+        return summary[:120]
+
+    # 2. Sentinel front detected approaching
+    if sentinel_front and sentinel_front.get("detected"):
+        station = sentinel_front.get("station_name", "Villa Reynolds")
+        eta = sentinel_front.get("estimated_arrival_minutes", 60)
+        summary = f"Frente frío avanzando desde {station}: ráfagas y tormenta en ~{eta} min."
+        return summary[:120]
+
+    w_code = current.get("weather_code", 0)
+    is_precip = current.get("is_precipitating_now", False)
+    curr_t = current.get("temperature_c")
+
+    # 3. Active storm or rain now
+    if w_code in (95, 96, 99) or (is_precip and w_code >= 61):
+        phenom = "Tormenta fuerte" if w_code in (96, 99) else "Tormenta" if w_code == 95 else "Lluvia"
+        # Look for when it clears in the next 12h
+        clear_hour = None
+        for h in hourly[:12]:
+            if h.get("weather_code", 0) < 50 and (h.get("precip_mm") or 0.0) < 0.1 and (h.get("precip_prob_pct") or 0) < 30:
+                t_str = h.get("timestamp_utc", "")
+                try:
+                    dt_c = datetime.fromisoformat(t_str.replace("Z", "+00:00")).astimezone(CORDOBA_TZ)
+                    clear_hour = dt_c.strftime("%H:00")
+                    break
+                except Exception:
+                    pass
+
+        night_min = daily[0].get("temperature_min_c") if daily else None
+        if clear_hour and night_min is not None:
+            summary = f"{phenom} hasta las {clear_hour}, luego mejora y baja a {int(round(night_min))} °C a la noche."
+        elif clear_hour:
+            summary = f"{phenom} hasta las {clear_hour}, luego cielo mejorando."
+        else:
+            summary = f"{phenom} activa en la zona con ambiente húmedo e inestable."
+        return summary[:120]
+
+    # 4. Rain or storm expected in the upcoming 8 hours
+    upcoming_rain_hour = None
+    upcoming_is_storm = False
+    for h in hourly[:8]:
+        code = h.get("weather_code", 0)
+        prob = h.get("precip_prob_pct") or 0
+        if code in (95, 96, 99):
+            upcoming_is_storm = True
+            t_str = h.get("timestamp_utc", "")
+            try:
+                dt_r = datetime.fromisoformat(t_str.replace("Z", "+00:00")).astimezone(CORDOBA_TZ)
+                upcoming_rain_hour = dt_r.strftime("%H:00")
+            except Exception:
+                pass
+            break
+        elif (code in (51, 61, 63, 65) or prob >= 50) and upcoming_rain_hour is None:
+            t_str = h.get("timestamp_utc", "")
+            try:
+                dt_r = datetime.fromisoformat(t_str.replace("Z", "+00:00")).astimezone(CORDOBA_TZ)
+                upcoming_rain_hour = dt_r.strftime("%H:00")
+            except Exception:
+                pass
+
+    if upcoming_rain_hour:
+        max_t = daily[0].get("temperature_max_c") if daily else curr_t
+        t_part = f", máxima de {int(round(max_t))} °C" if max_t is not None else ""
+        if upcoming_is_storm:
+            summary = f"Probables tormentas aisladas desde las {upcoming_rain_hour}{t_part} con viento sur."
+        else:
+            summary = f"Lluvias probables desde las {upcoming_rain_hour}{t_part} y descenso térmico."
+        return summary[:120]
+
+    # 5. Stable / fair weather
+    max_t = daily[0].get("temperature_max_c") if daily else curr_t
+    wspd = current.get("wind_speed_kmh") or 0.0
+    wdir = current.get("wind_direction_deg")
+    wind_sector = "norte" if wdir is not None and (wdir <= 45 or wdir >= 315) else "sur" if wdir is not None and 135 <= wdir <= 225 else "este"
+    wind_intensity = "moderado" if wspd >= 18 else "leve"
+
+    if max_t is not None and max_t >= 28:
+        summary = f"Tarde soleada hasta {int(round(max_t))} °C, viento {wind_sector} {wind_intensity} y noche templada."
+    elif max_t is not None and max_t >= 20:
+        summary = f"Tarde templada hasta {int(round(max_t))} °C, cielo despejado y viento {wind_sector}."
+    elif max_t is not None:
+        summary = f"Jornada fresca con máxima de {int(round(max_t))} °C, viento {wind_sector} y noche despejada."
+    else:
+        summary = "Tiempo estable y cielo mayormente despejado en la región."
+
+    if len(summary) > 120:
+        summary = summary[:117] + "..."
+    return summary
 
 
 def _weighted_mean(values: Dict[str, Optional[float]], weights: Dict[str, float]) -> float:
@@ -649,7 +810,6 @@ def _weighted_wind_direction(dirs: Dict[str, Optional[float]], weights: Dict[str
         if d is not None and key in weights:
             w = weights[key]
             rad = math.radians(d)
-            # Met wind: direction FROM which wind blows
             sum_u += w * (-math.sin(rad))
             sum_v += w * (-math.cos(rad))
             total_w += w

@@ -195,6 +195,8 @@ def init_db(custom_path: Optional[str] = None, database_url: Optional[str] = Non
             session.execute("ALTER TABLE alert_state ADD COLUMN IF NOT EXISTS last_severity TEXT")
             session.execute("ALTER TABLE alert_state ADD COLUMN IF NOT EXISTS last_sent_utc TEXT")
             session.execute("ALTER TABLE alert_state ADD COLUMN IF NOT EXISTS payload_summary TEXT")
+            session.execute("ALTER TABLE metar_history ADD COLUMN IF NOT EXISTS wind_dir_deg REAL")
+            session.execute("ALTER TABLE metar_history ADD COLUMN IF NOT EXISTS dewp_c REAL")
         else:
             cur = session.conn.execute("PRAGMA table_info(alert_state)")
             existing_cols = [r["name"] for r in cur.fetchall()]
@@ -204,6 +206,13 @@ def init_db(custom_path: Optional[str] = None, database_url: Optional[str] = Non
                 session.conn.execute("ALTER TABLE alert_state ADD COLUMN last_sent_utc TEXT")
             if "payload_summary" not in existing_cols:
                 session.conn.execute("ALTER TABLE alert_state ADD COLUMN payload_summary TEXT")
+
+            cur_m = session.conn.execute("PRAGMA table_info(metar_history)")
+            existing_m_cols = [r["name"] for r in cur_m.fetchall()]
+            if "wind_dir_deg" not in existing_m_cols:
+                session.conn.execute("ALTER TABLE metar_history ADD COLUMN wind_dir_deg REAL")
+            if "dewp_c" not in existing_m_cols:
+                session.conn.execute("ALTER TABLE metar_history ADD COLUMN dewp_c REAL")
 
 
 def get_cached_payload(
@@ -263,18 +272,30 @@ def save_metar_record(
     raw_metar: str,
     custom_path: Optional[str] = None,
     database_url: Optional[str] = None,
+    wind_dir_deg: Optional[float] = None,
+    dewp_c: Optional[float] = None,
 ) -> bool:
     """Inserts a METAR observation, ignoring duplicate (icao, obs_time_utc)."""
     try:
         with get_db_session(custom_path=custom_path, database_url=database_url) as session:
             session.execute("""
-                INSERT INTO metar_history (icao, obs_time_utc, temp_c, wind_kmh, qnh_hpa, raw_metar)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO metar_history (icao, obs_time_utc, temp_c, wind_kmh, qnh_hpa, raw_metar, wind_dir_deg, dewp_c)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(icao, obs_time_utc) DO NOTHING
-            """, (icao, obs_time_utc, temp_c, wind_kmh, qnh_hpa, raw_metar))
+            """, (icao, obs_time_utc, temp_c, wind_kmh, qnh_hpa, raw_metar, wind_dir_deg, dewp_c))
         return True
     except Exception:
-        return False
+        # Fallback for old schema without wind_dir_deg/dewp_c columns
+        try:
+            with get_db_session(custom_path=custom_path, database_url=database_url) as session:
+                session.execute("""
+                    INSERT INTO metar_history (icao, obs_time_utc, temp_c, wind_kmh, qnh_hpa, raw_metar)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(icao, obs_time_utc) DO NOTHING
+                """, (icao, obs_time_utc, temp_c, wind_kmh, qnh_hpa, raw_metar))
+            return True
+        except Exception:
+            return False
 
 
 def get_metar_history(

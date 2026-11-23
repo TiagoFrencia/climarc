@@ -1,7 +1,7 @@
 import re
 import math
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import httpx
 
 from ..config import settings
@@ -59,7 +59,7 @@ async def fetch_metar_observations(
     Parses and persists readings into SQLite metar_history.
     Falls back gracefully to SQLite cache on network issues.
     """
-    stations = station_ids or ["SAOC", "SACO"]
+    stations = station_ids or ["SAOC", "SACO", "SAOR", "SAOL"]
     ids_param = ",".join(stations)
     url = f"{METAR_URL}?ids={ids_param}&format=json"
     headers = {"User-Agent": settings.USER_AGENT}
@@ -126,6 +126,8 @@ async def fetch_metar_observations(
                             wind_kmh=wind_kmh,
                             qnh_hpa=altim_hpa,
                             raw_metar=raw_ob,
+                            wind_dir_deg=wdir_deg,
+                            dewp_c=dewp_c,
                         )
 
                     results[icao] = {
@@ -202,3 +204,84 @@ async def fetch_metar_observations(
                 }
 
     return results
+
+
+def calculate_qnh_trend(
+    icao: str = "SAOC",
+    current_qnh: Optional[float] = None,
+    history_records: Optional[List[Dict[str, Any]]] = None,
+    custom_path: Optional[str] = None,
+) -> Tuple[str, Optional[float]]:
+    """
+    Computes barometric QNH pressure tendency over the last 3 hours:
+    - 'subiendo': delta >= +1.5 hPa
+    - 'bajando_rapido': delta <= -3.0 hPa
+    - 'bajando': delta <= -1.5 hPa
+    - 'estable': between -1.5 and +1.5 hPa
+    Returns (trend_str, delta_3h_hpa).
+    """
+    history = history_records
+    if history is None:
+        try:
+            history = get_metar_history(icao=icao, hours=4, custom_path=custom_path)
+        except Exception:
+            history = []
+
+    if not history:
+        return "estable", 0.0 if current_qnh is not None else None
+
+    # Latest QNH
+    latest_qnh = current_qnh
+    latest_dt = None
+    if latest_qnh is None:
+        for r in history:
+            if r.get("qnh_hpa") is not None:
+                latest_qnh = float(r["qnh_hpa"])
+                t_str = r.get("obs_time_utc", "")
+                try:
+                    latest_dt = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
+                except Exception:
+                    pass
+                break
+
+    if latest_qnh is None:
+        return "estable", None
+
+    if latest_dt is None:
+        latest_dt = datetime.now(timezone.utc)
+
+    # Find the record closest to 3 hours prior (between 1.5h and 4.0h)
+    best_record = None
+    best_diff_from_3h = float("inf")
+
+    for r in history:
+        q = r.get("qnh_hpa")
+        t_str = r.get("obs_time_utc")
+        if q is not None and t_str:
+            try:
+                dt = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
+                elapsed_hours = (latest_dt - dt).total_seconds() / 3600.0
+                if 1.5 <= elapsed_hours <= 4.0:
+                    diff = abs(elapsed_hours - 3.0)
+                    if diff < best_diff_from_3h:
+                        best_diff_from_3h = diff
+                        best_record = r
+            except Exception:
+                pass
+
+    if not best_record or best_record.get("qnh_hpa") is None:
+        return "estable", 0.0
+
+    past_qnh = float(best_record["qnh_hpa"])
+    delta = round(latest_qnh - past_qnh, 1)
+
+    if delta <= -3.0:
+        trend = "bajando_rapido"
+    elif delta <= -1.5:
+        trend = "bajando"
+    elif delta >= 1.5:
+        trend = "subiendo"
+    else:
+        trend = "estable"
+
+    return trend, delta

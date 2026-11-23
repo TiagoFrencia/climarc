@@ -20,6 +20,8 @@ from .metar_service import fetch_metar_observations
 from .open_meteo_service import fetch_open_meteo_forecast
 from .wrf_reader_service import read_wrf_forecast
 from .smn_alerts_service import fetch_smn_alerts
+from .sentinel_service import detect_approaching_front
+from .hail_service import evaluate_hail_risk
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +71,21 @@ def evaluate_alert_conditions(
     open_meteo_hourly: Optional[List[Dict[str, Any]]] = None,
     wrf_city_data: Optional[Dict[str, Any]] = None,
     smn_alerts: Optional[List[Dict[str, Any]]] = None,
+    hail_risk: Optional[Dict[str, Any]] = None,
+    sentinel_front: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Evaluates weather conditions for city_key and categorizes alerts into:
     - Priority 1 (Critical — ignores quiet hours):
+        * Imminent Stage 2 Hail / Confirmed Ground Hail (SAOC/SAOR)
+        * Sentinel Approaching Front (SAOR / SAOL)
         * Severe METAR runway phenomena (TS, TSRA, GR, SQ, FC, +RA)
         * Rapid barometric drop (>= 3 hPa in 3h)
         * Official SMN alerts level naranja/rojo or ACP
         * Extreme gusts (>= 70 km/h)
         * Severe WRF 3x3 core (>= 15 mm/h)
     - Priority 2 (Preventive — respects quiet hours):
+        * Stage 1 Preventive Hail Risk (level alto or extremo)
         * Imminent rain: prob >= threshold or mm >= threshold in next 2h, or WRF 3x3 >= threshold in next 2h
         * Strong gusts: >= threshold km/h in next 3h
         * Sharp thermal drop: drop >= threshold °C in <= 3h, or apparent temp <= threshold °C in next 3h
@@ -92,6 +99,48 @@ def evaluate_alert_conditions(
     # -------------------------------------------------------------
     # PRIORIDAD 1: FENÓMENOS CRÍTICOS / SEVEROS (IGNORA SILENCIO)
     # -------------------------------------------------------------
+
+    # 0. Alerta Antigranizo Etapa 2 (inminente: GOES-19 núcleo severo o granizo en SAOC/SAOR)
+    if hail_risk and (hail_risk.get("imminent_hail_alert") or hail_risk.get("sentinel_hail_detected")):
+        alerts.append({
+            "priority": 1,
+            "level": "rojo" if hail_risk.get("sentinel_hail_detected") else "naranja",
+            "type": "alerta_antigranizo_etapa2",
+            "alert_key": "hail:imminent",
+            "title": "Alerta Antigranizo — Inminente",
+            "description": "Núcleo convectivo severo con potencial de granizo detectado en aproximación. Conviene resguardar vehículos inmediatamente.",
+            "source": "ClimaRC-Antigranizo",
+            "details": {
+                "hail_level": hail_risk.get("level"),
+                "hail_score": hail_risk.get("score"),
+                "cape_max": hail_risk.get("cape_max"),
+                "shear_0_6km_kmh": hail_risk.get("shear_0_6km_kmh"),
+                "peak_window": hail_risk.get("peak_window_local"),
+                "goes_severe_core": hail_risk.get("goes_severe_core_detected"),
+                "sentinel_hail": hail_risk.get("sentinel_hail_detected"),
+            },
+        })
+
+    # 0.b Alerta Frente Centinela (cuando SAOR o SAOL detectan frente en avance)
+    if sentinel_front and sentinel_front.get("detected"):
+        st_name = sentinel_front.get("station_name", "Villa Reynolds")
+        st_icao = sentinel_front.get("station_icao", "SAOR")
+        dist = sentinel_front.get("distance_km", 115)
+        card = sentinel_front.get("cardinal", "SO")
+        eta = sentinel_front.get("estimated_arrival_minutes", 60)
+        alerts.append({
+            "priority": 1,
+            "level": "naranja",
+            "type": "frente_centinela",
+            "alert_key": f"sentinel:front:{st_icao}",
+            "title": f"Aviso Centinela — Frente en avance ({st_name})",
+            "description": (
+                f"La estación centinela {st_name} ({st_icao}, {dist} km al {card}) reporta avance frontal severo "
+                f"hacia Río Cuarto con arribo estimado en ~{eta} minutos."
+            ),
+            "source": "ClimaRC-Centinelas",
+            "details": sentinel_front.get("details", {}),
+        })
 
     # 1. METAR active phenomena
     if metar_obs:
@@ -284,6 +333,33 @@ def evaluate_alert_conditions(
     # -------------------------------------------------------------
     # PRIORIDAD 2: ALERTAS PREVENTIVAS (RESPETA HORARIO DE SILENCIO)
     # -------------------------------------------------------------
+
+    # 0. Aviso preventivo por potencial de granizo (Etapa 1 nivel alto o extremo)
+    if (
+        hail_risk
+        and hail_risk.get("level") in ("alto", "extremo")
+        and not hail_risk.get("imminent_hail_alert")
+    ):
+        lvl = hail_risk.get("level")
+        alerts.append({
+            "priority": 2,
+            "level": "naranja" if lvl == "extremo" else "amarillo",
+            "type": "riesgo_granizo_etapa1",
+            "alert_key": "hail:preventivo",
+            "title": f"Aviso por potencial de granizo ({lvl})",
+            "description": (
+                f"Condiciones atmosféricas propicias para tormentas con granizo en la ventana {hail_risk.get('peak_window_local')}. "
+                f"CAPE máximo de {hail_risk.get('cape_max')} J/kg y cizalladura de {hail_risk.get('shear_0_6km_kmh')} km/h."
+            ),
+            "source": "ClimaRC-Antigranizo",
+            "details": {
+                "hail_level": lvl,
+                "hail_score": hail_risk.get("score"),
+                "cape_jkg": hail_risk.get("cape_max"),
+                "shear_kmh": hail_risk.get("shear_0_6km_kmh"),
+                "peak_window": hail_risk.get("peak_window_local"),
+            },
+        })
 
     rain_prob_thresh = float(alert_settings.get("rain_prob_pct", 60.0))
     rain_mm_thresh = float(alert_settings.get("rain_mm", 1.5))
@@ -593,8 +669,8 @@ async def check_and_dispatch_cron(
         close_client = True
 
     try:
-        # Fetch observations & forecasts
-        metar_map = await fetch_metar_observations(station_ids=[city_cfg.icao], client=client)
+        # Fetch observations & forecasts (all 4 sentinel stations in single HTTP call)
+        metar_map = await fetch_metar_observations(client=client)
         metar_obs = metar_map.get(city_cfg.icao)
 
         metar_history = get_metar_history(city_cfg.icao, hours=6, custom_path=custom_db_path)
@@ -608,6 +684,10 @@ async def check_and_dispatch_cron(
         smn_alerts_res = await fetch_smn_alerts(client=client)
         smn_alerts = smn_alerts_res.get("alerts", [])
 
+        # Evaluate Sentinel Fronts and 2-Stage Hail Risk
+        sentinel_front = detect_approaching_front(metar_map, custom_db_path=custom_db_path)
+        hail_risk = await evaluate_hail_risk(open_meteo_res, wrf_res, metar_map, client=client)
+
         # Read settings from DB (falling back to config defaults)
         alert_settings = get_alert_settings(custom_path=custom_db_path)
 
@@ -620,6 +700,8 @@ async def check_and_dispatch_cron(
             open_meteo_hourly=open_meteo_hourly,
             wrf_city_data=wrf_city_data,
             smn_alerts=smn_alerts,
+            hail_risk=hail_risk,
+            sentinel_front=sentinel_front,
         )
 
         current_weather_summary = None

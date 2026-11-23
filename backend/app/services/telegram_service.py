@@ -47,8 +47,17 @@ def format_alert_message(
     Includes severity, phenomenon, key readings and optional PWA link.
     """
     severity = str(alert.get("level", "amarillo")).lower()
+    alert_type = alert.get("type", "")
     icon = SEVERITY_ICONS.get(severity, "🟡")
     label = SEVERITY_LABELS.get(severity, "AVISO")
+
+    if alert_type == "alerta_antigranizo_etapa2":
+        icon = "🧊"
+        label = "ALERTA ANTIGRANIZO — Río Cuarto"
+    elif alert_type == "frente_centinela":
+        icon = "🚨"
+        label = "AVISO CENTINELA — Frente en avance"
+
     title = html.escape(alert.get("title", "Alerta Meteorológica"))
     description = html.escape(alert.get("description", ""))
 
