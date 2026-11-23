@@ -21,7 +21,7 @@ async def fetch_open_meteo_forecast(
         "hourly": (
             "temperature_2m,apparent_temperature,relative_humidity_2m,"
             "precipitation,precipitation_probability,wind_speed_10m,"
-            "wind_gusts_10m,wind_direction_10m,surface_pressure,weather_code,cape"
+            "wind_gusts_10m,wind_direction_10m,surface_pressure,pressure_msl,weather_code,cape"
         ),
         "daily": (
             "weather_code,temperature_2m_max,temperature_2m_min,"
@@ -70,6 +70,7 @@ async def fetch_open_meteo_forecast(
                 wgst = _get_series_val(raw_hourly, f"wind_gusts_10m_{m}", idx)
                 wdir = _get_series_val(raw_hourly, f"wind_direction_10m_{m}", idx)
                 psfc = _get_series_val(raw_hourly, f"surface_pressure_{m}", idx)
+                pmsl = _get_series_val(raw_hourly, f"pressure_msl_{m}", idx)
                 wcode = _get_series_val(raw_hourly, f"weather_code_{m}", idx)
                 cape = _get_series_val(raw_hourly, f"cape_{m}", idx)
 
@@ -83,6 +84,7 @@ async def fetch_open_meteo_forecast(
                     "wind_gust_kmh": wgst,
                     "wind_direction_deg": wdir,
                     "surface_pressure_hpa": psfc,
+                    "pressure_msl_hpa": pmsl,
                     "weather_code": wcode,
                     "cape_jkg": cape,
                 }

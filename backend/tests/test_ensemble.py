@@ -84,6 +84,7 @@ def test_ensemble_without_wrf(sample_open_meteo):
         wrf_data=wrf_empty,
         metar_data=None,
         reference_time=REF_TIME,
+        enable_ml=False,
     )
 
     assert res["wrf_available"] is False
@@ -129,6 +130,7 @@ def test_ensemble_with_wrf(sample_open_meteo):
         wrf_data=wrf_data,
         metar_data=None,
         reference_time=REF_TIME,
+        enable_ml=False,
     )
 
     assert res["wrf_available"] is True

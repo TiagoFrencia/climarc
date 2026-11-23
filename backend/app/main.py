@@ -155,6 +155,8 @@ async def get_weather(
         wrf_data=wrf_res,
         metar_data=metar_obs,
         max_hourly_steps=72,
+        lat=city_cfg.lat,
+        lon=city_cfg.lon,
     )
 
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -170,6 +172,7 @@ async def get_weather(
         "confidence": ensemble["overall_confidence"],
         "wrf_available": ensemble["wrf_available"],
         "smn_official_available": smn_alerts_res.get("smn_available", False),
+        "ml_metadata": ensemble.get("ml_metadata", {}),
     }
 
     # Save to SQLite cache

@@ -46,6 +46,7 @@ def test_nowcast_blending_fresh_metar(base_forecast):
         wrf_data={"wrf_available": False, "cities": {}},
         metar_data=fresh_metar,
         reference_time=REF_TIME,
+        enable_ml=False,
     )
 
     h0 = res["hourly"][0]
@@ -82,6 +83,7 @@ def test_nowcast_blending_stale_metar(base_forecast):
         wrf_data={"wrf_available": False, "cities": {}},
         metar_data=stale_metar,
         reference_time=REF_TIME,
+        enable_ml=False,
     )
 
     h0 = res["hourly"][0]

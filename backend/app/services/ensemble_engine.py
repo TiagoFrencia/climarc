@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
 from ..database import save_forecast_snapshots
+from .ml_corrector import ml_corrector
 
 
 def generate_ensemble_forecast(
@@ -12,6 +13,9 @@ def generate_ensemble_forecast(
     metar_data: Optional[Dict[str, Any]] = None,
     max_hourly_steps: int = 72,
     reference_time: Optional[datetime] = None,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    enable_ml: bool = True,
 ) -> Dict[str, Any]:
     """
     Blends multi-model numerical forecasts:
@@ -59,8 +63,26 @@ def generate_ensemble_forecast(
     snapshots_to_save: List[Dict[str, Any]] = []
     models_active_set = set()
 
+    # Pre-compute raw ensemble temperatures for temp_trend_3h feature
+    raw_temps_series: List[float] = []
+    for om_item in candidate_om_hourly:
+        t_utc_pre = om_item["timestamp_utc"]
+        models_om_pre = om_item.get("models", {})
+        wrf_item_pre = wrf_map.get(t_utc_pre)
+        use_wrf_pre = wrf_available and (wrf_item_pre is not None)
+        w_dict = {"wrf": 0.35, "ecmwf": 0.35, "icon": 0.15, "gfs": 0.15} if use_wrf_pre else {"ecmwf": 0.55, "icon": 0.25, "gfs": 0.20}
+        t_dict = {
+            "ecmwf": models_om_pre.get("ecmwf_ifs025", {}).get("temperature_c"),
+            "icon": models_om_pre.get("icon_seamless", {}).get("temperature_c"),
+            "gfs": models_om_pre.get("gfs_seamless", {}).get("temperature_c"),
+        }
+        if use_wrf_pre and wrf_item_pre:
+            t_dict["wrf"] = wrf_item_pre.get("temperature_c")
+        raw_temps_series.append(_weighted_mean(t_dict, w_dict))
+
     for step_idx, om_item in enumerate(candidate_om_hourly):
         t_utc = om_item["timestamp_utc"]
+        trend_3h = round(raw_temps_series[step_idx] - raw_temps_series[step_idx - 3], 2) if step_idx >= 3 else 0.0
         models_om = om_item.get("models", {})
 
         m_ecmwf = models_om.get("ecmwf_ifs025", {})
@@ -127,15 +149,22 @@ def generate_ensemble_forecast(
             rhs["wrf"] = wrf_item.get("relative_humidity_pct")
         ens_rh = _weighted_mean(rhs, weights)
 
-        # Surface pressure
-        pressures = {
-            "ecmwf": m_ecmwf.get("surface_pressure_hpa"),
-            "icon": m_icon.get("surface_pressure_hpa"),
-            "gfs": m_gfs.get("surface_pressure_hpa"),
+        # Standardized Sea Level Pressure (QNH / pressure_msl, ~1010 hPa)
+        # Note: WRF PSFC is station pressure (~958 hPa); NEVER mix station pressure with sea level QNH!
+        msl_pressures = {
+            "ecmwf": m_ecmwf.get("pressure_msl_hpa") if m_ecmwf.get("pressure_msl_hpa") is not None else m_ecmwf.get("surface_pressure_hpa"),
+            "icon": m_icon.get("pressure_msl_hpa") if m_icon.get("pressure_msl_hpa") is not None else m_icon.get("surface_pressure_hpa"),
+            "gfs": m_gfs.get("pressure_msl_hpa") if m_gfs.get("pressure_msl_hpa") is not None else m_gfs.get("surface_pressure_hpa"),
         }
-        if use_wrf and wrf_item:
-            pressures["wrf"] = wrf_item.get("surface_pressure_hpa")
-        ens_pressure = _weighted_mean(pressures, weights)
+        ens_pressure_msl = _weighted_mean(msl_pressures, {"ecmwf": 0.55, "icon": 0.25, "gfs": 0.20})
+
+        final_pressure = round(ens_pressure_msl, 1) if ens_pressure_msl is not None else None
+        if metar_fresh and metar_data and metar_data.get("qnh_hpa") is not None:
+            m_qnh = metar_data["qnh_hpa"]
+            if step_idx == 0:
+                final_pressure = round(m_qnh, 1)
+            elif step_idx == 1 and ens_pressure_msl is not None:
+                final_pressure = round(0.35 * m_qnh + 0.65 * ens_pressure_msl, 1)
 
         # Wind direction vector average
         dirs = {
@@ -183,11 +212,33 @@ def generate_ensemble_forecast(
         else:
             confidence = "baja"
 
-        # Nowcast blending for step 0 (t+0) and step 1 (t+1)
         raw_ens_temp = round(ens_temp, 1)
         raw_ens_wind = round(ens_wind, 1)
-        final_temp = raw_ens_temp
-        final_wind = raw_ens_wind
+
+        # Local ML Bias Corrector (LightGBM)
+        if enable_ml:
+            ml_temp_adj, ml_wind_adj, ml_applied = ml_corrector.compute_adjustments_for_step(
+                timestamp_utc=t_utc,
+                pred_temp_c=raw_ens_temp,
+                pred_rh_pct=ens_rh,
+                pred_pressure_msl=ens_pressure_msl,
+                pred_precip_mm=ens_precip,
+                pred_wind_kmh=raw_ens_wind,
+                pred_wind_dir_deg=ens_wdir,
+                temp_trend_3h=trend_3h,
+                city_key=city_key,
+                lat=lat,
+                lon=lon,
+            )
+        else:
+            ml_temp_adj, ml_wind_adj, ml_applied = 0.0, 0.0, False
+
+        ens_temp_adj = raw_ens_temp + ml_temp_adj
+        ens_wind_adj = max(0.0, raw_ens_wind + ml_wind_adj)
+
+        # Nowcast blending for step 0 (t+0) and step 1 (t+1) with fresh METAR
+        final_temp = round(ens_temp_adj, 1)
+        final_wind = round(ens_wind_adj, 1)
         final_rh = round(ens_rh, 1) if ens_rh is not None else None
         nowcast_blended = False
 
@@ -199,19 +250,19 @@ def generate_ensemble_forecast(
             if step_idx == 0:
                 # 70% METAR / 30% ensemble
                 if m_temp is not None:
-                    final_temp = round(0.70 * m_temp + 0.30 * raw_ens_temp, 1)
+                    final_temp = round(0.70 * m_temp + 0.30 * ens_temp_adj, 1)
                     nowcast_blended = True
                 if m_wind is not None:
-                    final_wind = round(0.70 * m_wind + 0.30 * raw_ens_wind, 1)
+                    final_wind = round(0.70 * m_wind + 0.30 * ens_wind_adj, 1)
                 if m_rh is not None and final_rh is not None:
                     final_rh = round(0.70 * m_rh + 0.30 * final_rh, 1)
             elif step_idx == 1:
                 # 35% METAR / 65% ensemble
                 if m_temp is not None:
-                    final_temp = round(0.35 * m_temp + 0.65 * raw_ens_temp, 1)
+                    final_temp = round(0.35 * m_temp + 0.65 * ens_temp_adj, 1)
                     nowcast_blended = True
                 if m_wind is not None:
-                    final_wind = round(0.35 * m_wind + 0.65 * raw_ens_wind, 1)
+                    final_wind = round(0.35 * m_wind + 0.65 * ens_wind_adj, 1)
                 if m_rh is not None and final_rh is not None:
                     final_rh = round(0.35 * m_rh + 0.65 * final_rh, 1)
 
@@ -254,7 +305,8 @@ def generate_ensemble_forecast(
             "wind_speed_kmh": final_wind,
             "wind_gust_kmh": round(ens_gust, 1),
             "wind_direction_deg": round(ens_wdir, 0),
-            "surface_pressure_hpa": round(ens_pressure, 1) if ens_pressure is not None else None,
+            "pressure_hpa": final_pressure,
+            "surface_pressure_hpa": final_pressure,
             "weather_code": weather_code,
             "cape_jkg": round(ens_cape, 0),
             "confidence": confidence,
@@ -262,6 +314,9 @@ def generate_ensemble_forecast(
             "nowcast_blended": nowcast_blended,
             "raw_ensemble_temp_c": raw_ens_temp,
             "raw_ensemble_wind_kmh": raw_ens_wind,
+            "ml_temp_adjustment_c": ml_temp_adj,
+            "ml_wind_adjustment_kmh": ml_wind_adj,
+            "ml_applied": ml_applied,
             "wrf_nearby_precip_max_mm": wrf_nearby_p,
             "models_comparison": models_comp,
         }
@@ -328,10 +383,15 @@ def generate_ensemble_forecast(
             "wind_speed_kmh": h0["wind_speed_kmh"],
             "wind_gust_kmh": h0["wind_gust_kmh"],
             "wind_direction_deg": h0["wind_direction_deg"],
+            "pressure_hpa": h0["pressure_hpa"],
             "surface_pressure_hpa": h0["surface_pressure_hpa"],
             "weather_code": h0["weather_code"],
             "nowcast_blended": h0["nowcast_blended"],
             "confidence": h0["confidence"],
+            "raw_ensemble_temp_c": h0["raw_ensemble_temp_c"],
+            "ml_temp_adjustment_c": h0["ml_temp_adjustment_c"],
+            "ml_wind_adjustment_kmh": h0["ml_wind_adjustment_kmh"],
+            "ml_applied": h0["ml_applied"],
             "metar_station": metar_data.get("icao") if metar_data else None,
             "metar_age_minutes": metar_data.get("age_minutes") if metar_data else None,
             "metar_raw": metar_data.get("raw_metar") if metar_data else "",
@@ -344,6 +404,7 @@ def generate_ensemble_forecast(
         "models_active": sorted(list(models_active_set)),
         "wrf_available": wrf_available,
         "overall_confidence": blended_hourly[0]["confidence"] if blended_hourly else "media",
+        "ml_metadata": ml_corrector.get_metadata(),
     }
 
 
