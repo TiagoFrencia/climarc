@@ -104,6 +104,20 @@ export async function testTelegramAlert(adminPin?: string): Promise<AlertTestRes
   return handleResponse<AlertTestResponse>(res);
 }
 
+export async function testTelegramBriefing(adminPin?: string): Promise<AlertTestResponse> {
+  const targetUrl = API_BASE_URL ? `${API_BASE_URL}/api/alerts/briefing/test` : '/api/alerts/briefing/test';
+  const headers: Record<string, string> = {};
+  if (adminPin && adminPin.trim()) {
+    headers['X-ADMIN-PIN'] = adminPin.trim();
+  }
+
+  const res = await fetch(targetUrl, {
+    method: 'POST',
+    headers,
+  });
+  return handleResponse<AlertTestResponse>(res);
+}
+
 export async function fetchRouteWeather(params: {
   origin?: string;
   destination: string;

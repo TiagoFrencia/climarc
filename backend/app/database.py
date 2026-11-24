@@ -183,6 +183,10 @@ def init_db(custom_path: Optional[str] = None, database_url: Optional[str] = Non
                 quiet_enabled INTEGER NOT NULL DEFAULT 0,
                 quiet_start_hour INTEGER NOT NULL DEFAULT 23,
                 quiet_end_hour INTEGER NOT NULL DEFAULT 7,
+                briefing_enabled INTEGER NOT NULL DEFAULT 1,
+                briefing_send_hour INTEGER NOT NULL DEFAULT 20,
+                briefing_window_start INTEGER NOT NULL DEFAULT 22,
+                briefing_window_end INTEGER NOT NULL DEFAULT 6,
                 updated_at_utc TEXT NOT NULL
             )
         """)
@@ -190,13 +194,17 @@ def init_db(custom_path: Optional[str] = None, database_url: Optional[str] = Non
         session.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_city_target ON forecast_snapshots(city, target_time_utc)")
         session.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_state_city_key ON alert_state(city, alert_key)")
 
-        # Ensure alert_state columns exist if table was created in an earlier migration
+        # Ensure alert_state and alert_settings columns exist if table was created in an earlier migration
         if use_pg:
             session.execute("ALTER TABLE alert_state ADD COLUMN IF NOT EXISTS last_severity TEXT")
             session.execute("ALTER TABLE alert_state ADD COLUMN IF NOT EXISTS last_sent_utc TEXT")
             session.execute("ALTER TABLE alert_state ADD COLUMN IF NOT EXISTS payload_summary TEXT")
             session.execute("ALTER TABLE metar_history ADD COLUMN IF NOT EXISTS wind_dir_deg REAL")
             session.execute("ALTER TABLE metar_history ADD COLUMN IF NOT EXISTS dewp_c REAL")
+            session.execute("ALTER TABLE alert_settings ADD COLUMN IF NOT EXISTS briefing_enabled INTEGER NOT NULL DEFAULT 1")
+            session.execute("ALTER TABLE alert_settings ADD COLUMN IF NOT EXISTS briefing_send_hour INTEGER NOT NULL DEFAULT 20")
+            session.execute("ALTER TABLE alert_settings ADD COLUMN IF NOT EXISTS briefing_window_start INTEGER NOT NULL DEFAULT 22")
+            session.execute("ALTER TABLE alert_settings ADD COLUMN IF NOT EXISTS briefing_window_end INTEGER NOT NULL DEFAULT 6")
         else:
             cur = session.conn.execute("PRAGMA table_info(alert_state)")
             existing_cols = [r["name"] for r in cur.fetchall()]
@@ -213,6 +221,17 @@ def init_db(custom_path: Optional[str] = None, database_url: Optional[str] = Non
                 session.conn.execute("ALTER TABLE metar_history ADD COLUMN wind_dir_deg REAL")
             if "dewp_c" not in existing_m_cols:
                 session.conn.execute("ALTER TABLE metar_history ADD COLUMN dewp_c REAL")
+
+            cur_s = session.conn.execute("PRAGMA table_info(alert_settings)")
+            existing_s_cols = [r["name"] for r in cur_s.fetchall()]
+            if "briefing_enabled" not in existing_s_cols:
+                session.conn.execute("ALTER TABLE alert_settings ADD COLUMN briefing_enabled INTEGER NOT NULL DEFAULT 1")
+            if "briefing_send_hour" not in existing_s_cols:
+                session.conn.execute("ALTER TABLE alert_settings ADD COLUMN briefing_send_hour INTEGER NOT NULL DEFAULT 20")
+            if "briefing_window_start" not in existing_s_cols:
+                session.conn.execute("ALTER TABLE alert_settings ADD COLUMN briefing_window_start INTEGER NOT NULL DEFAULT 22")
+            if "briefing_window_end" not in existing_s_cols:
+                session.conn.execute("ALTER TABLE alert_settings ADD COLUMN briefing_window_end INTEGER NOT NULL DEFAULT 6")
 
 
 def get_cached_payload(
@@ -442,7 +461,9 @@ def get_alert_settings(
             SELECT
                 rain_prob_pct, rain_mm, wrf_nearby_mm, gust_kmh,
                 temp_drop_c, cold_apparent_c, cape_jkg, cooldown_hours,
-                quiet_enabled, quiet_start_hour, quiet_end_hour, updated_at_utc
+                quiet_enabled, quiet_start_hour, quiet_end_hour,
+                briefing_enabled, briefing_send_hour, briefing_window_start, briefing_window_end,
+                updated_at_utc
             FROM alert_settings
             WHERE id = 1
         """)
@@ -460,8 +481,14 @@ def get_alert_settings(
                 "quiet_enabled": bool(settings.ALERT_QUIET_ENABLED),
                 "quiet_start_hour": int(settings.ALERT_QUIET_START_HOUR),
                 "quiet_end_hour": int(settings.ALERT_QUIET_END_HOUR),
+                "briefing_enabled": bool(settings.BRIEFING_ENABLED),
+                "briefing_send_hour": int(settings.BRIEFING_SEND_HOUR),
+                "briefing_window_start": int(settings.BRIEFING_WINDOW_START),
+                "briefing_window_end": int(settings.BRIEFING_WINDOW_END),
                 "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
+        
+        row_keys = row.keys() if hasattr(row, "keys") else []
         return {
             "rain_prob_pct": float(row["rain_prob_pct"]),
             "rain_mm": float(row["rain_mm"]),
@@ -474,6 +501,10 @@ def get_alert_settings(
             "quiet_enabled": bool(row["quiet_enabled"]),
             "quiet_start_hour": int(row["quiet_start_hour"]),
             "quiet_end_hour": int(row["quiet_end_hour"]),
+            "briefing_enabled": bool(row["briefing_enabled"]) if "briefing_enabled" in row_keys and row["briefing_enabled"] is not None else bool(settings.BRIEFING_ENABLED),
+            "briefing_send_hour": int(row["briefing_send_hour"]) if "briefing_send_hour" in row_keys and row["briefing_send_hour"] is not None else int(settings.BRIEFING_SEND_HOUR),
+            "briefing_window_start": int(row["briefing_window_start"]) if "briefing_window_start" in row_keys and row["briefing_window_start"] is not None else int(settings.BRIEFING_WINDOW_START),
+            "briefing_window_end": int(row["briefing_window_end"]) if "briefing_window_end" in row_keys and row["briefing_window_end"] is not None else int(settings.BRIEFING_WINDOW_END),
             "updated_at_utc": row["updated_at_utc"],
         }
 
@@ -497,8 +528,10 @@ def update_alert_settings(
             INSERT INTO alert_settings (
                 id, rain_prob_pct, rain_mm, wrf_nearby_mm, gust_kmh,
                 temp_drop_c, cold_apparent_c, cape_jkg, cooldown_hours,
-                quiet_enabled, quiet_start_hour, quiet_end_hour, updated_at_utc
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                quiet_enabled, quiet_start_hour, quiet_end_hour,
+                briefing_enabled, briefing_send_hour, briefing_window_start, briefing_window_end,
+                updated_at_utc
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 rain_prob_pct = excluded.rain_prob_pct,
                 rain_mm = excluded.rain_mm,
@@ -511,6 +544,10 @@ def update_alert_settings(
                 quiet_enabled = excluded.quiet_enabled,
                 quiet_start_hour = excluded.quiet_start_hour,
                 quiet_end_hour = excluded.quiet_end_hour,
+                briefing_enabled = excluded.briefing_enabled,
+                briefing_send_hour = excluded.briefing_send_hour,
+                briefing_window_start = excluded.briefing_window_start,
+                briefing_window_end = excluded.briefing_window_end,
                 updated_at_utc = excluded.updated_at_utc
         """, (
             float(merged["rain_prob_pct"]),
@@ -524,6 +561,10 @@ def update_alert_settings(
             1 if merged["quiet_enabled"] else 0,
             int(merged["quiet_start_hour"]),
             int(merged["quiet_end_hour"]),
+            1 if merged.get("briefing_enabled", True) else 0,
+            int(merged.get("briefing_send_hour", 20)),
+            int(merged.get("briefing_window_start", 22)),
+            int(merged.get("briefing_window_end", 6)),
             now_utc,
         ))
     return merged

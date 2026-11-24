@@ -212,3 +212,103 @@ async def send_telegram_alert(
     finally:
         if close_client:
             await client.aclose()
+
+
+async def send_chat_action(
+    action: str = "typing",
+    client: Optional[httpx.AsyncClient] = None,
+    token: Optional[str] = None,
+    chat_id: Optional[str] = None,
+) -> bool:
+    """
+    Sends a chat action status to Telegram (e.g. 'typing', 'upload_photo').
+    Fails silently returning False on network errors.
+    """
+    bot_token = token if token is not None else settings.TELEGRAM_BOT_TOKEN
+    target_chat = chat_id if chat_id is not None else settings.TELEGRAM_CHAT_ID
+
+    bot_token = bot_token.strip() if bot_token else ""
+    target_chat = target_chat.strip() if target_chat else ""
+
+    if not bot_token or not target_chat:
+        return False
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendChatAction"
+    close_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=5.0)
+        close_client = True
+
+    try:
+        resp = await client.post(url, json={"chat_id": target_chat, "action": action})
+        return resp.status_code == 200
+    except Exception as exc:
+        logger.warning(f"Error enviando sendChatAction ({action}) a Telegram: {exc}")
+        return False
+    finally:
+        if close_client:
+            await client.aclose()
+
+
+async def send_telegram_photo(
+    photo_bytes: bytes,
+    caption: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    token: Optional[str] = None,
+    chat_id: Optional[str] = None,
+    filename: str = "goes19_cordoba.png",
+) -> Dict[str, Any]:
+    """
+    Sends a photo to Telegram via multipart/form-data (sendPhoto).
+    100% in-memory from bytes.
+    """
+    bot_token = token if token is not None else settings.TELEGRAM_BOT_TOKEN
+    target_chat = chat_id if chat_id is not None else settings.TELEGRAM_CHAT_ID
+
+    bot_token = bot_token.strip() if bot_token else ""
+    target_chat = target_chat.strip() if target_chat else ""
+
+    if not bot_token or not target_chat:
+        logger.warning("Telegram Bot Token o Chat ID no configurados. Omitiendo envío de foto.")
+        return {"sent": False, "reason": "telegram_not_configured"}
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+    data: Dict[str, Any] = {
+        "chat_id": target_chat,
+        "parse_mode": "HTML",
+    }
+    if caption:
+        data["caption"] = caption
+
+    files = {
+        "photo": (filename, photo_bytes, "image/png"),
+    }
+
+    close_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=15.0)
+        close_client = True
+
+    try:
+        resp = await client.post(url, data=data, files=files)
+        if resp.status_code == 200:
+            res_data = resp.json()
+            message_id = res_data.get("result", {}).get("message_id")
+            return {"sent": True, "message_id": message_id}
+        else:
+            logger.warning(f"Telegram sendPhoto devolvió error {resp.status_code}: {resp.text}")
+            return {
+                "sent": False,
+                "reason": f"telegram_api_error_{resp.status_code}",
+                "detail": resp.text,
+            }
+    except Exception as exc:
+        logger.error(f"Error de conexión enviando foto a Telegram: {exc}")
+        return {
+            "sent": False,
+            "reason": "telegram_network_error",
+            "detail": str(exc),
+        }
+    finally:
+        if close_client:
+            await client.aclose()

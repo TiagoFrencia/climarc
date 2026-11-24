@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, Query, HTTPException, Request, Header, Depends
+from fastapi import FastAPI, Query, HTTPException, Request, Header, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import httpx
@@ -33,7 +33,12 @@ from .services.sentinel_service import get_sentinels_summary, detect_approaching
 from .services.hail_service import evaluate_hail_risk
 from .services.route_service import get_route_weather
 from .services.telegram_service import format_test_message, send_telegram_alert
-from .services.alerts_service import check_and_dispatch_cron
+from .services.alerts_service import check_and_dispatch_cron, generate_daily_briefing_html
+from .services.telegram_bot_handler import (
+    handle_telegram_message_background,
+    is_update_processed,
+    mark_update_processed,
+)
 
 RAINVIEWER_MAPS_URL = "https://api.rainviewer.com/public/weather-maps.json"
 REALEARTH_TIMES_URL = "https://realearth.ssec.wisc.edu/api/times?products=G19-ABI-FD-BAND13-GRAD"
@@ -425,6 +430,22 @@ def verify_cron_secret(x_cron_secret: Optional[str] = Header(None, alias="X-CRON
     return True
 
 
+def verify_telegram_webhook_secret(
+    x_telegram_secret: Optional[str] = Header(None, alias="X-Telegram-Bot-Api-Secret-Token")
+) -> bool:
+    """
+    Validates X-Telegram-Bot-Api-Secret-Token against TELEGRAM_WEBHOOK_SECRET.
+    Returns 401 if missing or mismatched.
+    """
+    expected = settings.TELEGRAM_WEBHOOK_SECRET.strip() if settings.TELEGRAM_WEBHOOK_SECRET else ""
+    if not expected or not x_telegram_secret or x_telegram_secret.strip() != expected:
+        raise HTTPException(
+            status_code=401,
+            detail="Header X-Telegram-Bot-Api-Secret-Token inválido o ausente.",
+        )
+    return True
+
+
 def verify_admin_pin(x_admin_pin: Optional[str] = Header(None, alias="X-ADMIN-PIN")) -> bool:
     """
     Verifies the admin PIN for mutating settings or triggering tests.
@@ -455,6 +476,52 @@ class AlertSettingsUpdate(BaseModel):
     quiet_enabled: Optional[bool] = None
     quiet_start_hour: Optional[int] = Field(None, ge=0, le=23)
     quiet_end_hour: Optional[int] = Field(None, ge=0, le=23)
+    briefing_enabled: Optional[bool] = None
+    briefing_send_hour: Optional[int] = Field(None, ge=0, le=23)
+    briefing_window_start: Optional[int] = Field(None, ge=0, le=23)
+    briefing_window_end: Optional[int] = Field(None, ge=0, le=23)
+
+
+@app.post("/api/telegram/webhook", dependencies=[Depends(verify_telegram_webhook_secret)])
+async def telegram_webhook_endpoint(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Interactive Telegram Webhook entrypoint.
+    - Validates X-Telegram-Bot-Api-Secret-Token against TELEGRAM_WEBHOOK_SECRET.
+    - Strictly whitelists chat.id against TELEGRAM_CHAT_ID (silent 200 OK for untrusted chats).
+    - Deduplicates updates by update_id to protect against Render cold-start retries.
+    - Enqueues command handling into FastAPI BackgroundTasks and returns 200 OK immediately (<50ms).
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"ok": False, "error": "invalid_json"}
+
+    update_id = payload.get("update_id")
+    if update_id is not None:
+        if is_update_processed(update_id):
+            logger.debug(f"Telegram update_id {update_id} ya procesado. Descartando reintento.")
+            return {"ok": True, "status": "duplicate"}
+        mark_update_processed(update_id)
+
+    message = payload.get("message") or payload.get("edited_message")
+    if not message:
+        return {"ok": True, "status": "no_message"}
+
+    chat = message.get("chat", {})
+    chat_id = str(chat.get("id", "")).strip()
+    allowed_chat_id = str(settings.TELEGRAM_CHAT_ID).strip() if settings.TELEGRAM_CHAT_ID else ""
+
+    if not allowed_chat_id or chat_id != allowed_chat_id:
+        logger.warning(
+            f"Update de chat_id={chat_id} ignorado silenciosamente por whitelist (esperado={allowed_chat_id})."
+        )
+        return {"ok": True, "status": "ignored"}
+
+    background_tasks.add_task(handle_telegram_message_background, message)
+    return {"ok": True}
 
 
 @app.post("/api/alerts/check", dependencies=[Depends(verify_cron_secret)])
@@ -538,6 +605,26 @@ async def test_alerts_endpoint():
         current_weather=current_summary,
     )
     send_res = await send_telegram_alert(test_msg)
+    return {
+        "status": "ok" if send_res.get("sent") else "warning",
+        "result": send_res,
+    }
+
+
+@app.post("/api/alerts/briefing/test", dependencies=[Depends(verify_admin_pin)])
+async def test_briefing_endpoint():
+    """
+    Sends a test Daily Briefing to Telegram with current conditions and overnight forecast.
+    Protected strictly by X-ADMIN-PIN header.
+    """
+    async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
+        alert_settings = get_alert_settings()
+        briefing_html = await generate_daily_briefing_html(
+            city_key="rio_cuarto",
+            alert_settings=alert_settings,
+            client=client,
+        )
+        send_res = await send_telegram_alert(message_html=briefing_html, client=client)
     return {
         "status": "ok" if send_res.get("sent") else "warning",
         "result": send_res,

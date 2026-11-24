@@ -1,3 +1,4 @@
+import html
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 import logging
@@ -22,6 +23,7 @@ from .wrf_reader_service import read_wrf_forecast
 from .smn_alerts_service import fetch_smn_alerts
 from .sentinel_service import detect_approaching_front
 from .hail_service import evaluate_hail_risk
+from .route_service import get_route_weather
 
 logger = logging.getLogger(__name__)
 
@@ -713,7 +715,7 @@ async def check_and_dispatch_cron(
                 "pressure_hpa": metar_obs.get("qnh_hpa"),
             }
 
-        # Filter & Dispatch
+        # Filter & Dispatch regular proactive alerts
         dispatch_result = await process_and_dispatch_alerts(
             detected_alerts=detected,
             city_key=city_cfg.key,
@@ -723,7 +725,221 @@ async def check_and_dispatch_cron(
             custom_db_path=custom_db_path,
         )
 
+        # Evaluate and dispatch scheduled Daily Briefing (Sprint 2.3)
+        briefing_dispatched = None
+        briefing_enabled = alert_settings.get("briefing_enabled", True)
+        if briefing_enabled:
+            now_cordoba = datetime.now(CORDOBA_TZ)
+            send_hour = int(alert_settings.get("briefing_send_hour", 20))
+            if now_cordoba.hour == send_hour:
+                today_str = now_cordoba.strftime("%Y-%m-%d")
+                briefing_key = f"daily_briefing:{today_str}"
+                prev_briefing = get_alert_state(city=city_cfg.key, alert_key=briefing_key, custom_path=custom_db_path)
+                if not prev_briefing or not prev_briefing.get("last_sent_utc"):
+                    logger.info(f"Disparando briefing diario programado ({briefing_key})...")
+                    briefing_html = await generate_daily_briefing_html(
+                        city_key=city_cfg.key,
+                        alert_settings=alert_settings,
+                        client=client,
+                        custom_db_path=custom_db_path,
+                    )
+                    b_send = await send_telegram_alert(message_html=briefing_html, client=client)
+                    set_alert_state(
+                        city=city_cfg.key,
+                        alert_key=briefing_key,
+                        last_severity="verde",
+                        payload_summary="Briefing diario programado enviado",
+                        last_sent_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        active=1,
+                        custom_path=custom_db_path,
+                    )
+                    briefing_dispatched = {
+                        "alert_key": briefing_key,
+                        "sent": b_send.get("sent", False),
+                        "reason": b_send.get("reason"),
+                        "message_id": b_send.get("message_id"),
+                    }
+                else:
+                    logger.debug(f"Briefing diario {briefing_key} ya fue enviado hoy. Omitiendo.")
+
+        dispatch_result["briefing"] = briefing_dispatched
         return dispatch_result
     finally:
         if close_client:
             await client.aclose()
+
+
+async def generate_daily_briefing_html(
+    city_key: str = "rio_cuarto",
+    alert_settings: Optional[Dict[str, Any]] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    custom_db_path: Optional[str] = None,
+) -> str:
+    """
+    Generates a structured, scannable Daily Briefing for Telegram.
+    Summarizes conditions for the configured night/morning window (default 22:00 to 06:00),
+    including min temp, apparent temp, rain prob & mm, peak gusts, hail risk, and road status.
+    """
+    if alert_settings is None:
+        alert_settings = get_alert_settings(custom_path=custom_db_path)
+
+    w_start = int(alert_settings.get("briefing_window_start", 22))
+    w_end = int(alert_settings.get("briefing_window_end", 6))
+
+    now_cordoba = datetime.now(CORDOBA_TZ)
+    date_str = now_cordoba.strftime("%d/%m")
+    city_cfg = PRECONFIGURED_CITIES.get(city_key, PRECONFIGURED_CITIES["rio_cuarto"])
+
+    close_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=10.0)
+        close_client = True
+
+    try:
+        # Fetch METAR, Open-Meteo, WRF and Route 36 concurrently
+        metar_map = await fetch_metar_observations(client=client)
+        saoc = metar_map.get("SAOC")
+
+        forecast = await fetch_open_meteo_forecast(lat=city_cfg.lat, lon=city_cfg.lon, client=client)
+        hourly_list = forecast.get("hourly", [])
+
+        wrf_res = await read_wrf_forecast(client=client)
+        hail = await evaluate_hail_risk(forecast, wrf_res, metar_map, client=client)
+
+        route_res = await get_route_weather(origin="rio_cuarto", destination="cordoba")
+    finally:
+        if close_client:
+            await client.aclose()
+
+    # Filter window items
+    window_items = []
+    for item in hourly_list:
+        t_utc_str = item.get("timestamp_utc", "")
+        try:
+            dt_utc = datetime.fromisoformat(t_utc_str.replace("Z", "+00:00"))
+            dt_loc = dt_utc.astimezone(CORDOBA_TZ)
+            hr = dt_loc.hour
+            is_in_window = (
+                (dt_loc.date() == now_cordoba.date() and hr >= w_start) or
+                (dt_loc.date() == (now_cordoba + timedelta(days=1)).date() and hr <= w_end)
+            ) if w_start > w_end else (
+                dt_loc.date() == now_cordoba.date() and w_start <= hr <= w_end
+            )
+            if is_in_window:
+                window_items.append(item)
+        except Exception:
+            pass
+
+    eval_items = window_items if window_items else hourly_list[:8]
+
+    min_temp = None
+    min_app = None
+    max_precip = 0.0
+    max_prob = 0.0
+    max_gust = 0.0
+
+    for it in eval_items:
+        models = it.get("models", {})
+        m_ifs = models.get("ecmwf_ifs025", {})
+        m_icon = models.get("icon_seamless", {})
+        m_gfs = models.get("gfs_seamless", {})
+
+        temps = [m.get("temp_c") for m in [m_ifs, m_icon, m_gfs] if m.get("temp_c") is not None]
+        if temps:
+            cur_t = min(temps)
+            min_temp = cur_t if min_temp is None else min(min_temp, cur_t)
+
+        apps = [m.get("apparent_temp_c") for m in [m_ifs, m_icon, m_gfs] if m.get("apparent_temp_c") is not None]
+        if apps:
+            cur_a = min(apps)
+            min_app = cur_a if min_app is None else min(min_app, cur_a)
+
+        precips = [m.get("precip_mm") or 0.0 for m in [m_ifs, m_icon, m_gfs]]
+        if precips:
+            max_precip = max(max_precip, max(precips))
+
+        probs = [m.get("precip_prob_pct") or 0.0 for m in [m_ifs, m_icon, m_gfs]]
+        if probs:
+            max_prob = max(max_prob, max(probs))
+
+        gusts = [m.get("wind_gust_kmh") or 0.0 for m in [m_ifs, m_icon, m_gfs]]
+        if gusts:
+            max_gust = max(max_gust, max(gusts))
+
+    min_temp_val = min_temp if min_temp is not None else 15.0
+    min_app_val = min_app if min_app is not None else min_temp_val
+
+    # Pressure tendency
+    qnh = saoc.get("qnh_hpa") if saoc else None
+    history = get_metar_history(icao="SAOC", hours=3, custom_path=custom_db_path)
+    tendency_str = "Estable"
+    if qnh is not None and history and len(history) >= 2:
+        oldest_qnh = history[-1].get("qnh_hpa")
+        if oldest_qnh is not None:
+            delta_p = qnh - oldest_qnh
+            if abs(delta_p) < 0.8:
+                tendency_str = "Estable"
+            elif delta_p > 0:
+                tendency_str = f"Subiendo (+{delta_p:.1f} hPa/3h)"
+            else:
+                tendency_str = f"Bajando ({delta_p:.1f} hPa/3h)"
+
+    # Hail info
+    h_level = hail.get("stage1_risk_level", "sin_riesgo").upper()
+    h_score = hail.get("stage1_score", 0.0)
+    if h_level == "EXTREMO":
+        hail_badge = "🔴 EXTREMO"
+    elif h_level == "ALTO":
+        hail_badge = "🟠 ALTO"
+    elif h_level == "MODERADO":
+        hail_badge = "🟡 MODERADO"
+    else:
+        hail_badge = "🟢 SIN RIESGO"
+
+    # Route info
+    r_status = route_res.get("global_status", "optimo")
+    if r_status == "peligroso":
+        route_badge = "🔴 Peligroso (precaución extrema)"
+    elif r_status == "precaucion":
+        route_badge = "🟡 Precaución"
+    else:
+        route_badge = "🟢 Óptimo"
+
+    # Advice
+    if max_precip >= 5.0 or max_gust >= 55.0:
+        advice = "Alerta por precipitaciones o ráfagas fuertes durante la madrugada. Asegurar objetos y cerrar ventanas."
+    elif max_precip >= 1.0 or max_prob >= 50.0:
+        advice = "Inestabilidad pasajera con posibles lloviznas. Noche húmeda."
+    elif min_temp_val <= 8.0:
+        advice = "Descenso térmico marcado. Noche fría, abrigarse temprano."
+    elif min_temp_val >= 23.0:
+        advice = "Noche calurosa y húmeda. Ventilar o climatizar ambientes."
+    else:
+        advice = "Condiciones tranquilas y agradables. Sin alertas activas para la noche."
+
+    url = settings.FRONTEND_URL.strip() if settings.FRONTEND_URL else "https://climarc.vercel.app"
+
+    lines = [
+        "🌙 <b>BRIEFING DIARIO — Río Cuarto</b>",
+        f"📅 <i>{date_str} · Ventana {w_start:02d}:00 a {w_end:02d}:00 hs</i>",
+        "",
+        f"🌡️ <b>Mínima nocturna:</b> <b>{min_temp_val:.1f} °C</b> (Sensación: {min_app_val:.1f} °C)",
+        f"🌧️ <b>Lluvia prevista:</b> {max_precip:.1f} mm (Prob: {max_prob:.0f}%)",
+        f"💨 <b>Ráfagas máximas:</b> {max_gust:.0f} km/h",
+    ]
+
+    if qnh is not None:
+        lines.append(f"🧭 <b>Presión actual:</b> {qnh:.1f} hPa · <i>{tendency_str}</i>")
+
+    lines.extend([
+        "",
+        f"🧊 <b>Riesgo Granizo:</b> {hail_badge} (Score: {h_score:.0f}/100)",
+        f"🛣️ <b>RN 36 a Córdoba:</b> {route_badge}",
+        "",
+        "💡 <b>Recomendación práctica:</b>",
+        f"<i>{advice}</i>",
+        "",
+        f'📲 <a href="{html.escape(url)}">Abrir ClimaRC en vivo</a>',
+    ])
+
+    return "\n".join(lines)

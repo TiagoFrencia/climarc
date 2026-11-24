@@ -64,9 +64,10 @@ class Settings(BaseSettings):
     CRON_SECRET: str = os.getenv("CRON_SECRET", "climarc-local-secret-cron-key")
     ADMIN_PIN: str = os.getenv("ADMIN_PIN", "")
 
-    # Telegram Bot & Proactive Alerts (Fase 5)
+    # Telegram Bot & Proactive Alerts (Fase 5 / Sprint 2.3)
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    TELEGRAM_WEBHOOK_SECRET: str = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "")
 
     # Alert Threshold Defaults (leíbles desde entorno para sobrevivir reinicios de Render)
@@ -81,6 +82,12 @@ class Settings(BaseSettings):
     ALERT_QUIET_ENABLED: bool = os.getenv("ALERT_QUIET_ENABLED", "false").lower() in ("true", "1", "yes")
     ALERT_QUIET_START_HOUR: int = int(os.getenv("ALERT_QUIET_START_HOUR", "23"))
     ALERT_QUIET_END_HOUR: int = int(os.getenv("ALERT_QUIET_END_HOUR", "7"))
+
+    # Daily Briefing Defaults (Sprint 2.3)
+    BRIEFING_ENABLED: bool = os.getenv("BRIEFING_ENABLED", "true").lower() in ("true", "1", "yes")
+    BRIEFING_SEND_HOUR: int = int(os.getenv("BRIEFING_SEND_HOUR", "20"))
+    BRIEFING_WINDOW_START: int = int(os.getenv("BRIEFING_WINDOW_START", "22"))
+    BRIEFING_WINDOW_END: int = int(os.getenv("BRIEFING_WINDOW_END", "6"))
 
     # CORS
     ALLOWED_ORIGINS: Union[List[str], str] = [

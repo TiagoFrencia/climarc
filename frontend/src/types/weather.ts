@@ -319,6 +319,10 @@ export interface AlertThresholdSettings {
   quiet_enabled: boolean;
   quiet_start_hour: number;
   quiet_end_hour: number;
+  briefing_enabled?: boolean;
+  briefing_send_hour?: number;
+  briefing_window_start?: number;
+  briefing_window_end?: number;
   updated_at_utc?: string;
 }
 

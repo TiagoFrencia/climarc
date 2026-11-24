@@ -32,6 +32,8 @@ data/training_cache/
 *.db
 *.sqlite
 *.sqlite3
+*.tmp
+data/*.tmp
 !data/wrf_latest.json
 
 .vercel

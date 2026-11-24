@@ -17,6 +17,7 @@ import {
   fetchAlertSettings,
   saveAlertSettings,
   testTelegramAlert,
+  testTelegramBriefing,
 } from '../services/api';
 import type { AlertThresholdSettings, RecentAlertRecord } from '../types/weather';
 
@@ -79,6 +80,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [quietStartHour, setQuietStartHour] = useState<number>(23);
   const [quietEndHour, setQuietEndHour] = useState<number>(7);
 
+  // Daily Briefing state (Sprint 2.3)
+  const [briefingEnabled, setBriefingEnabled] = useState<boolean>(true);
+  const [briefingSendHour, setBriefingSendHour] = useState<number>(20);
+  const [briefingWindowStart, setBriefingWindowStart] = useState<number>(22);
+  const [briefingWindowEnd, setBriefingWindowEnd] = useState<number>(6);
+  const [briefingTestLoading, setBriefingTestLoading] = useState<boolean>(false);
+
   // Feedback states
   const [feedback, setFeedback] = useState<{
     type: 'success' | 'error' | 'warning';
@@ -117,6 +125,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           setQuietEnabled(s.quiet_enabled ?? false);
           setQuietStartHour(s.quiet_start_hour ?? 23);
           setQuietEndHour(s.quiet_end_hour ?? 7);
+          setBriefingEnabled(s.briefing_enabled ?? true);
+          setBriefingSendHour(s.briefing_send_hour ?? 20);
+          setBriefingWindowStart(s.briefing_window_start ?? 22);
+          setBriefingWindowEnd(s.briefing_window_end ?? 6);
         }
       })
       .catch((err) => {
@@ -152,6 +164,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       quiet_enabled: quietEnabled,
       quiet_start_hour: Number(quietStartHour),
       quiet_end_hour: Number(quietEndHour),
+      briefing_enabled: briefingEnabled,
+      briefing_send_hour: Number(briefingSendHour),
+      briefing_window_start: Number(briefingWindowStart),
+      briefing_window_end: Number(briefingWindowEnd),
     };
 
     try {
@@ -215,6 +231,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } finally {
       setTestLoading(false);
+    }
+  };
+
+  const handleTestBriefing = async () => {
+    setBriefingTestLoading(true);
+    setFeedback(null);
+
+    try {
+      const res = await testTelegramBriefing(adminPin);
+      if (res.result?.sent) {
+        setFeedback({
+          type: 'success',
+          message: '¡Briefing diario enviado con éxito a tu chat de Telegram!',
+        });
+      } else if (res.result?.reason === 'telegram_not_configured') {
+        setFeedback({
+          type: 'warning',
+          message: 'Telegram no está configurado. Definí TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID en el backend (.env).',
+        });
+      } else {
+        setFeedback({
+          type: 'error',
+          message: `Fallo al enviar briefing a Telegram: ${res.result?.reason || 'Error desconocido'}.`,
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('401')) {
+        setFeedback({
+          type: 'error',
+          message: 'Error 401: PIN de administrador incorrecto para enviar el briefing de prueba.',
+        });
+      } else {
+        setFeedback({
+          type: 'error',
+          message: `Error de conexión: ${msg}`,
+        });
+      }
+    } finally {
+      setBriefingTestLoading(false);
     }
   };
 
@@ -535,6 +591,107 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </option>
                     ))}
                   </select>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Daily Briefing Section (Sprint 2.3) */}
+          <div className="p-3.5 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-bold text-slate-200">
+                <Bell className="w-4 h-4 text-emerald-400" />
+                <span>Briefing Diario en Telegram</span>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={briefingEnabled}
+                  onChange={(e) => setBriefingEnabled(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
+              </label>
+            </div>
+
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Dispara automáticamente un resumen ejecutivo diario a tu Telegram con la mínima prevista, precipitaciones, ráfagas y riesgo de granizo para la ventana configurada.
+            </p>
+
+            {briefingEnabled && (
+              <div className="space-y-3 pt-1 animate-fadeIn">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800">
+                    <label className="text-[10px] font-semibold text-slate-400 block mb-1">
+                      Hora de envío (Córdoba)
+                    </label>
+                    <select
+                      value={briefingSendHour}
+                      onChange={(e) => setBriefingSendHour(Number(e.target.value))}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-xs text-slate-100 font-mono focus:outline-none focus:border-emerald-500"
+                    >
+                      {Array.from({ length: 24 }).map((_, i) => (
+                        <option key={i} value={i}>
+                          {i.toString().padStart(2, '0')}:00 hs
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800">
+                    <label className="text-[10px] font-semibold text-slate-400 block mb-1">
+                      Ventana: Desde
+                    </label>
+                    <select
+                      value={briefingWindowStart}
+                      onChange={(e) => setBriefingWindowStart(Number(e.target.value))}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-xs text-slate-100 font-mono focus:outline-none focus:border-emerald-500"
+                    >
+                      {Array.from({ length: 24 }).map((_, i) => (
+                        <option key={i} value={i}>
+                          {i.toString().padStart(2, '0')}:00 hs
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800">
+                    <label className="text-[10px] font-semibold text-slate-400 block mb-1">
+                      Ventana: Hasta
+                    </label>
+                    <select
+                      value={briefingWindowEnd}
+                      onChange={(e) => setBriefingWindowEnd(Number(e.target.value))}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-xs text-slate-100 font-mono focus:outline-none focus:border-emerald-500"
+                    >
+                      {Array.from({ length: 24 }).map((_, i) => (
+                        <option key={i} value={i}>
+                          {i.toString().padStart(2, '0')}:00 hs
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="flex justify-end pt-1">
+                  <button
+                    type="button"
+                    onClick={handleTestBriefing}
+                    disabled={briefingTestLoading || !telegramConfigured}
+                    className="py-1.5 px-3 rounded-xl bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-800/80 text-emerald-300 font-semibold text-xs flex items-center gap-1.5 transition-all disabled:opacity-40"
+                  >
+                    {briefingTestLoading ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Enviando briefing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Enviar briefing ahora</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
             )}
