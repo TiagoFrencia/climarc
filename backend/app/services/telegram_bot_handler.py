@@ -130,18 +130,24 @@ async def build_ahora_response(client: Optional[httpx.AsyncClient] = None) -> st
         else:
             apparent_c = temp_c
 
-    # Pressure tendency over 3 hours
-    tendency_str = "Estable"
-    if qnh is not None and history and len(history) >= 2:
-        oldest_qnh = history[-1].get("qnh_hpa")
-        if oldest_qnh is not None:
-            delta_p = qnh - oldest_qnh
-            if abs(delta_p) < 0.8:
-                tendency_str = "Estable (±0.5 hPa)"
-            elif delta_p > 0:
+    # Pressure tendency over 3 hours (unified with app and alerts service)
+    tendency_str = "Estable ➡️"
+    if qnh is not None and history:
+        from .metar_service import calculate_qnh_trend
+        trend, delta_p = calculate_qnh_trend(
+            icao="SAOC",
+            current_qnh=qnh,
+            history_records=history,
+        )
+        if delta_p is not None:
+            if delta_p >= 1.5:
                 tendency_str = f"Subiendo (+{delta_p:.1f} hPa/3h) ↗️"
-            else:
+            elif delta_p <= -3.0:
+                tendency_str = f"Bajando rápido ({delta_p:.1f} hPa/3h) ⏬"
+            elif delta_p <= -1.5:
                 tendency_str = f"Bajando ({delta_p:.1f} hPa/3h) ↘️"
+            else:
+                tendency_str = f"Estable ({'+' if delta_p > 0 else ''}{delta_p:.1f} hPa/3h) ➡️" if abs(delta_p) >= 0.1 else "Estable ➡️"
 
     # Status of SAOC runway
     cavok = saoc.get("cavok") if saoc else False
@@ -308,16 +314,17 @@ async def build_granizo_response(client: Optional[httpx.AsyncClient] = None) -> 
 
     hail = await evaluate_hail_risk(om_res, wrf_res, metar_map, client=client)
 
-    level = hail.get("stage1_risk_level", "sin_riesgo").upper()
-    score = hail.get("stage1_score", 0.0)
+    level = (hail.get("level") or hail.get("stage1_risk_level") or "sin_riesgo").upper()
+    score = float(hail.get("score") if hail.get("score") is not None else hail.get("stage1_score", 0.0))
     peak = hail.get("peak_window_local") or "Sin ventana de riesgo"
-    cape = hail.get("max_cape_jkg", 0.0)
-    shear = hail.get("max_shear_0_6km_kmh", 0.0)
-    fl = hail.get("freezing_level_m", 0.0)
+    cape = float(hail.get("cape_max") or hail.get("max_cape_jkg", 0.0))
+    shear = float(hail.get("shear_0_6km_kmh") or hail.get("max_shear_0_6km_kmh", 0.0))
+    fl = float(hail.get("freezing_level_m", 0.0))
 
-    stage2_temp = hail.get("stage2_min_brightness_temp_c")
-    stage2_severe = hail.get("stage2_severe_core_detected", False)
-    ground_hail = hail.get("ground_hail_confirmed", False)
+    stage2_details = hail.get("stage2_details") or {}
+    stage2_temp = hail.get("center_brightness_temp_c") if hail.get("center_brightness_temp_c") is not None else stage2_details.get("min_brightness_temp_c")
+    stage2_severe = hail.get("goes_severe_core_detected", False) or hail.get("stage2_severe_core_detected", False)
+    ground_hail = hail.get("sentinel_hail_detected", False) or hail.get("ground_hail_confirmed", False)
 
     # Sentinels status
     sentinels = hail.get("sentinel_observations", {})

@@ -448,6 +448,104 @@ def calculate_accuracy_metrics(
         }
 
 
+def get_model_accuracy_leaderboard(
+    city: str = "rio_cuarto",
+    icao: str = "SAOC",
+    days: int = 7,
+    custom_path: Optional[str] = None,
+    database_url: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Computes per-model MAE for temperature (°C) and wind (km/h)
+    crossed against real METAR observations over the requested days window (default 7 or 30 days).
+    Returns an ordered list from lowest to highest temperature MAE.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    MODEL_SPECS = [
+        ("ensemble_ml", "Final+IA"),
+        ("wrf_smn", "WRF-SMN 4km"),
+        ("ecmwf_ifs025", "ECMWF IFS"),
+        ("icon_seamless", "ICON"),
+        ("gfs_seamless", "GFS"),
+        ("ecmwf_aifs025", "ECMWF AIFS (IA)"),
+        ("ensemble_raw", "Ensamble Base"),
+    ]
+
+    leaderboard = []
+
+    with get_db_session(custom_path=custom_path, database_url=database_url) as session:
+        cur = session.execute("""
+            SELECT
+                s.model_source,
+                s.predicted_temp_c,
+                m.temp_c AS actual_temp_c,
+                s.predicted_wind_kmh,
+                m.wind_kmh AS actual_wind_kmh,
+                s.target_time_utc
+            FROM forecast_snapshots s
+            JOIN metar_history m
+                ON m.icao = ?
+                AND substr(s.target_time_utc, 1, 13) = substr(m.obs_time_utc, 1, 13)
+            WHERE s.city = ?
+              AND s.target_time_utc >= ?
+              AND m.temp_c IS NOT NULL
+              AND s.predicted_temp_c IS NOT NULL
+            ORDER BY s.target_time_utc DESC
+        """, (icao, city, cutoff))
+
+        rows = cur.fetchall()
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        ms = r["model_source"]
+        grouped.setdefault(ms, []).append(r)
+
+    for model_key, display_name in MODEL_SPECS:
+        m_rows = grouped.get(model_key, [])
+        if not m_rows and model_key == "ensemble_ml" and "ensemble" in grouped:
+            m_rows = grouped["ensemble"]
+        elif not m_rows and model_key == "ensemble_raw" and "ensemble" in grouped and "ensemble_ml" in grouped:
+            m_rows = grouped["ensemble"]
+
+        if not m_rows:
+            leaderboard.append({
+                "model_source": model_key,
+                "display_name": display_name,
+                "mae_temperature_c": None,
+                "mae_wind_kmh": None,
+                "samples_count": 0,
+            })
+            continue
+
+        temp_errors = [
+            abs(float(r["predicted_temp_c"]) - float(r["actual_temp_c"]))
+            for r in m_rows
+            if r["predicted_temp_c"] is not None and r["actual_temp_c"] is not None
+        ]
+        wind_errors = [
+            abs(float(r["predicted_wind_kmh"]) - float(r["actual_wind_kmh"]))
+            for r in m_rows
+            if r["predicted_wind_kmh"] is not None and r["actual_wind_kmh"] is not None
+        ]
+
+        mae_temp = round(sum(temp_errors) / len(temp_errors), 2) if temp_errors else None
+        mae_wind = round(sum(wind_errors) / len(wind_errors), 2) if wind_errors else None
+
+        leaderboard.append({
+            "model_source": model_key,
+            "display_name": display_name,
+            "mae_temperature_c": mae_temp,
+            "mae_wind_kmh": mae_wind,
+            "samples_count": len(m_rows),
+        })
+
+    # Sort: valid MAE ascending, then None
+    leaderboard.sort(key=lambda x: (x["mae_temperature_c"] is None, x["mae_temperature_c"] if x["mae_temperature_c"] is not None else 999.0))
+
+    return leaderboard
+
+
 def get_alert_settings(
     custom_path: Optional[str] = None,
     database_url: Optional[str] = None,

@@ -21,6 +21,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from ..config import settings
+from .hail_service import scan_goes19_band13
 
 logger = logging.getLogger(__name__)
 
@@ -209,8 +210,6 @@ async def generate_goes19_telegram_image(
             all(isinstance(t, bytes) and len(t) > 100 for t in ref_tiles)
         )
 
-        max_pixel_idx = 0
-
         # Create canvas layers
         base_canvas = Image.new("RGBA", CANVAS_SIZE, (24, 28, 36, 255))
         sat_canvas = Image.new("RGBA", CANVAS_SIZE, (0, 0, 0, 0))
@@ -234,9 +233,6 @@ async def generate_goes19_telegram_image(
             if isinstance(sat_tiles[idx], bytes):
                 try:
                     raw_s_img = Image.open(io.BytesIO(sat_tiles[idx]))
-                    arr = np.array(raw_s_img)
-                    max_pixel_idx = max(max_pixel_idx, int(np.max(arr)))
-
                     s_rgba = raw_s_img.convert("RGBA")
                     # If base map is available, apply ~85% opacity so underlying roads/shores show subtly
                     if esri_available:
@@ -264,8 +260,16 @@ async def generate_goes19_telegram_image(
             composite = Image.new("RGBA", CANVAS_SIZE, (20, 24, 33, 255))
             composite.paste(sat_canvas, (0, 0), sat_canvas)
 
-        # Compute minimum cloud top brightness temperature
-        min_temp_c = round((88.0 - max_pixel_idx) / 1.51, 1)
+        # Minimum cloud top brightness temperature strictly from calibrated grayscale GOES-19 Band 13 scanner
+        sat_scan = await scan_goes19_band13(client=client)
+        min_temp_c = sat_scan.get("min_brightness_temp_c") if sat_scan else None
+        if min_temp_c is None and sat_scan:
+            min_temp_c = sat_scan.get("center_brightness_temp_c")
+        if min_temp_c is None:
+            min_temp_c = 15.0  # Clear sky default when no cloud tops detected
+        else:
+            min_temp_c = round(float(min_temp_c), 1)
+
         convective_label, convective_icon = get_convective_status(min_temp_c)
 
         # Setup drawing and font

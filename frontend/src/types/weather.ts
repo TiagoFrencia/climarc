@@ -256,15 +256,33 @@ export interface RadarResponse {
   lightning?: LightningMetadata;
 }
 
+export interface ModelAccuracyLeaderboardItem {
+  model_source: string;
+  display_name: string;
+  mae_temperature_c: number | null;
+  mae_wind_kmh: number | null;
+  samples_count: number;
+}
+
 export interface AccuracyResponse {
   city: string;
   icao: string;
+  days?: number;
   model_source: string;
   samples_count: number;
   mae_temperature_c: number | null;
   mae_wind_kmh: number | null;
   status: string;
   message?: string;
+  leaderboard?: ModelAccuracyLeaderboardItem[];
+  adaptive_weights_active?: boolean;
+  min_samples_required?: number;
+  current_weights?: Record<string, number>;
+  progress_samples?: {
+    samples_accumulated: number;
+    target: number;
+    ready: boolean;
+  };
 }
 
 export interface HealthSourceWrf {

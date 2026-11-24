@@ -742,6 +742,8 @@ async def check_and_dispatch_cron(
                         alert_settings=alert_settings,
                         client=client,
                         custom_db_path=custom_db_path,
+                        hail_risk=hail_risk,
+                        active_alerts=detected,
                     )
                     b_send = await send_telegram_alert(message_html=briefing_html, client=client)
                     set_alert_state(
@@ -774,14 +776,31 @@ async def generate_daily_briefing_html(
     alert_settings: Optional[Dict[str, Any]] = None,
     client: Optional[httpx.AsyncClient] = None,
     custom_db_path: Optional[str] = None,
+    weather_payload: Optional[Dict[str, Any]] = None,
+    hail_risk: Optional[Dict[str, Any]] = None,
+    active_alerts: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """
     Generates a structured, scannable Daily Briefing for Telegram.
     Summarizes conditions for the configured night/morning window (default 22:00 to 06:00),
     including min temp, apparent temp, rain prob & mm, peak gusts, hail risk, and road status.
+    Uses exact hail_risk and active alerts matching /api/weather.
     """
     if alert_settings is None:
         alert_settings = get_alert_settings(custom_path=custom_db_path)
+
+    if weather_payload is None:
+        try:
+            from ..database import get_cached_payload
+            weather_payload = get_cached_payload(f"weather:{city_key}", custom_path=custom_db_path)
+        except Exception:
+            weather_payload = None
+
+    if hail_risk is None and weather_payload and weather_payload.get("hail_risk"):
+        hail_risk = weather_payload["hail_risk"]
+
+    if active_alerts is None and weather_payload and "alerts" in weather_payload:
+        active_alerts = weather_payload["alerts"]
 
     w_start = int(alert_settings.get("briefing_window_start", 22))
     w_end = int(alert_settings.get("briefing_window_end", 6))
@@ -804,7 +823,31 @@ async def generate_daily_briefing_html(
         hourly_list = forecast.get("hourly", [])
 
         wrf_res = await read_wrf_forecast(client=client)
-        hail = await evaluate_hail_risk(forecast, wrf_res, metar_map, client=client)
+
+        if hail_risk is not None:
+            hail = hail_risk
+        else:
+            hail = await evaluate_hail_risk(forecast, wrf_res, metar_map, client=client)
+
+        if active_alerts is None:
+            try:
+                smn_alerts_res = await fetch_smn_alerts(client=client)
+                smn_alerts = smn_alerts_res.get("alerts", [])
+                metar_obs = saoc
+                metar_history_recent = get_metar_history("SAOC", hours=6, custom_path=custom_db_path)
+                detected = evaluate_alert_conditions(
+                    city_key=city_key,
+                    alert_settings=alert_settings,
+                    metar_obs=metar_obs,
+                    metar_history=metar_history_recent,
+                    open_meteo_hourly=hourly_list,
+                    wrf_city_data=wrf_res.get("cities", {}).get(city_key),
+                    smn_alerts=smn_alerts,
+                    hail_risk=hail,
+                )
+                active_alerts = list(smn_alerts) + detected
+            except Exception:
+                active_alerts = []
 
         route_res = await get_route_weather(origin="rio_cuarto", destination="cordoba")
     finally:
@@ -871,22 +914,30 @@ async def generate_daily_briefing_html(
 
     # Pressure tendency
     qnh = saoc.get("qnh_hpa") if saoc else None
-    history = get_metar_history(icao="SAOC", hours=3, custom_path=custom_db_path)
+    history = get_metar_history(icao="SAOC", hours=4, custom_path=custom_db_path)
     tendency_str = "Estable"
-    if qnh is not None and history and len(history) >= 2:
-        oldest_qnh = history[-1].get("qnh_hpa")
-        if oldest_qnh is not None:
-            delta_p = qnh - oldest_qnh
-            if abs(delta_p) < 0.8:
-                tendency_str = "Estable"
-            elif delta_p > 0:
+    if qnh is not None and history:
+        from .metar_service import calculate_qnh_trend
+        trend, delta_p = calculate_qnh_trend(
+            icao="SAOC",
+            current_qnh=qnh,
+            history_records=history,
+            custom_path=custom_db_path,
+        )
+        if delta_p is not None:
+            if delta_p >= 1.5:
                 tendency_str = f"Subiendo (+{delta_p:.1f} hPa/3h)"
-            else:
+            elif delta_p <= -3.0:
+                tendency_str = f"Bajando rápido ({delta_p:.1f} hPa/3h)"
+            elif delta_p <= -1.5:
                 tendency_str = f"Bajando ({delta_p:.1f} hPa/3h)"
+            else:
+                tendency_str = f"Estable ({'+' if delta_p > 0 else ''}{delta_p:.1f} hPa/3h)" if abs(delta_p) >= 0.1 else "Estable"
 
     # Hail info
-    h_level = hail.get("stage1_risk_level", "sin_riesgo").upper()
-    h_score = hail.get("stage1_score", 0.0)
+    h_level = (hail.get("level") or hail.get("stage1_risk_level") or "sin_riesgo").upper()
+    h_score = float(hail.get("score") if hail.get("score") is not None else hail.get("stage1_score", 0.0))
+    h_window = hail.get("peak_window_local")
     if h_level == "EXTREMO":
         hail_badge = "🔴 EXTREMO"
     elif h_level == "ALTO":
@@ -905,9 +956,21 @@ async def generate_daily_briefing_html(
     else:
         route_badge = "🟢 Óptimo"
 
+    # Active alerts evaluation
+    filtered_alerts = [
+        a for a in (active_alerts or [])
+        if a.get("level") in ("amarillo", "naranja", "rojo") or a.get("priority", 2) == 1
+    ]
+
     # Advice
     if max_precip >= 5.0 or max_gust >= 55.0:
         advice = "Alerta por precipitaciones o ráfagas fuertes durante la madrugada. Asegurar objetos y cerrar ventanas."
+    elif h_level in ("ALTO", "EXTREMO") or any(a.get("level") in ("naranja", "rojo") for a in filtered_alerts):
+        advice = "Atención: Alerta meteorológica activa en la zona. Mantener resguardo y monitorear la evolución."
+    elif h_level == "MODERADO":
+        advice = f"Vigilancia activa por inestabilidad y riesgo moderado de granizo ({h_score:.0f}/100{f' hacia {h_window}' if h_window else ''})."
+    elif filtered_alerts:
+        advice = "Alerta meteorológica preventiva en la región. Conducir con precaución y asegurar elementos sueltos."
     elif max_precip >= 1.0 or max_prob >= 50.0:
         advice = "Inestabilidad pasajera con posibles lloviznas. Noche húmeda."
     elif min_temp_val <= 8.0:
@@ -931,10 +994,23 @@ async def generate_daily_briefing_html(
     if qnh is not None:
         lines.append(f"🧭 <b>Presión actual:</b> {qnh:.1f} hPa · <i>{tendency_str}</i>")
 
+    hail_line = f"🧊 <b>Riesgo Granizo:</b> {hail_badge} (Score: {h_score:.0f}/100{f' · Pico: {h_window}' if h_window else ''})"
     lines.extend([
         "",
-        f"🧊 <b>Riesgo Granizo:</b> {hail_badge} (Score: {h_score:.0f}/100)",
+        hail_line,
         f"🛣️ <b>RN 36 a Córdoba:</b> {route_badge}",
+    ])
+
+    if filtered_alerts:
+        lines.append("")
+        lines.append("⚠️ <b>Alertas meteorológicas activas:</b>")
+        for a in filtered_alerts[:2]:
+            lvl = a.get("level", "amarillo")
+            ico = "🔴" if lvl == "rojo" else "🟠" if lvl == "naranja" else "🟡"
+            t_str = html.escape(a.get("title", "Alerta activa"))
+            lines.append(f"• {ico} <b>{t_str}</b>")
+
+    lines.extend([
         "",
         "💡 <b>Recomendación práctica:</b>",
         f"<i>{advice}</i>",

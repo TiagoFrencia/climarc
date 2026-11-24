@@ -243,6 +243,7 @@ export const App: React.FC = () => {
               hourly={weatherData.hourly}
               city={weatherData.city}
               sentinels={weatherData.sentinels}
+              alerts={weatherData.alerts}
             />
 
             {/* 5. Live GOES-19 IR + RainViewer Radar Map Component */}

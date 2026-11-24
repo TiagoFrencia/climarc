@@ -17,6 +17,7 @@ from .database import (
     set_cached_payload,
     get_metar_history,
     calculate_accuracy_metrics,
+    get_model_accuracy_leaderboard,
     get_alert_settings,
     update_alert_settings,
     get_recent_alerts,
@@ -28,7 +29,11 @@ from .services.open_meteo_service import fetch_open_meteo_forecast
 from .services.wrf_reader_service import read_wrf_forecast
 from .services.smn_alerts_service import fetch_smn_alerts
 from .services.local_alerts_detector import detect_local_alerts
-from .services.ensemble_engine import generate_ensemble_forecast, generate_executive_summary
+from .services.ensemble_engine import (
+    generate_ensemble_forecast,
+    generate_executive_summary,
+    get_adaptive_weights_state,
+)
 from .services.sentinel_service import get_sentinels_summary, detect_approaching_front
 from .services.hail_service import evaluate_hail_risk
 from .services.route_service import get_route_weather
@@ -225,6 +230,7 @@ async def get_weather(
         daily=ensemble["daily"],
         hail_risk=hail_risk,
         sentinel_front=sentinel_front,
+        alerts=all_alerts,
     )
 
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -393,15 +399,48 @@ async def route_weather(
 
 @app.get("/api/accuracy")
 async def get_accuracy(
-    city: Optional[str] = Query("rio_cuarto", description="City key: rio_cuarto or cordoba")
+    city: Optional[str] = Query("rio_cuarto", description="City key: rio_cuarto or cordoba"),
+    days: int = Query(7, ge=1, le=90, description="Audit time window in days (7 or 30)"),
 ):
     """
     Precision auditor: crosses historical forecast snapshots with real airport METAR readings
     to compute Mean Absolute Error (MAE) for temperature (°C) and wind speed (km/h).
+    Returns per-model leaderboard and adaptive weights engine status.
     """
     city_cfg = get_city_config(city_key=city)
-    metrics = calculate_accuracy_metrics(city=city_cfg.key, icao=city_cfg.icao)
-    return metrics
+    leaderboard = get_model_accuracy_leaderboard(city=city_cfg.key, icao=city_cfg.icao, days=days)
+    adaptive_state = get_adaptive_weights_state(city_key=city_cfg.key, icao=city_cfg.icao, force_refresh=True)
+
+    top_model = next((m for m in leaderboard if m["model_source"] in ("ensemble_ml", "ensemble")), None)
+    if not top_model:
+        top_model = leaderboard[0] if leaderboard else {}
+
+    has_data = any((m.get("samples_count", 0) > 0) for m in leaderboard)
+
+    return {
+        "city": city_cfg.key,
+        "icao": city_cfg.icao,
+        "days": days,
+        "model_source": "ensemble_ml",
+        "samples_count": top_model.get("samples_count", 0),
+        "mae_temperature_c": top_model.get("mae_temperature_c"),
+        "mae_wind_kmh": top_model.get("mae_wind_kmh"),
+        "status": "ok" if has_data else "insufficient_history",
+        "message": (
+            "Auditoría activa con datos reales de Neon."
+            if has_data
+            else "Aún no hay suficientes pares de pronóstico histórico vs METAR real guardados en base de datos."
+        ),
+        "leaderboard": leaderboard,
+        "adaptive_weights_active": adaptive_state.get("adaptive_weights_active", False),
+        "min_samples_required": 48,
+        "current_weights": adaptive_state.get("current_weights", {}),
+        "progress_samples": {
+            "samples_accumulated": adaptive_state.get("samples_accumulated", 0),
+            "target": 48,
+            "ready": adaptive_state.get("adaptive_weights_active", False),
+        },
+    }
 
 
 # -------------------------------------------------------------
@@ -619,10 +658,12 @@ async def test_briefing_endpoint():
     """
     async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
         alert_settings = get_alert_settings()
+        cached_weather = get_cached_payload("weather:rio_cuarto")
         briefing_html = await generate_daily_briefing_html(
             city_key="rio_cuarto",
             alert_settings=alert_settings,
             client=client,
+            weather_payload=cached_weather,
         )
         send_res = await send_telegram_alert(message_html=briefing_html, client=client)
     return {

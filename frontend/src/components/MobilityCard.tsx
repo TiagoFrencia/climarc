@@ -18,6 +18,7 @@ import type {
   CityConfig,
   SentinelStationSummary,
   RouteWeatherResponse,
+  WeatherAlert,
 } from '../types/weather';
 import { fetchRouteWeather } from '../services/api';
 
@@ -26,6 +27,7 @@ interface MobilityCardProps {
   hourly: HourlyForecast[];
   city: CityConfig;
   sentinels?: SentinelStationSummary[];
+  alerts?: WeatherAlert[];
 }
 
 type TabMode = 'street' | 'route';
@@ -49,6 +51,7 @@ export const MobilityCard: React.FC<MobilityCardProps> = ({
   hourly,
   city,
   sentinels: _sentinels,
+  alerts,
 }) => {
   const [activeTab, setActiveTab] = useState<TabMode>('street');
   const [selectedDest, setSelectedDest] = useState<string>('cordoba');
@@ -147,6 +150,14 @@ export const MobilityCard: React.FC<MobilityCardProps> = ({
     };
   }
 
+  // Active severe alert check (naranja / rojo)
+  const severeAlert = alerts?.find(
+    (a) => a.level === 'naranja' || a.level === 'rojo'
+  );
+  const alertReasonText = severeAlert
+    ? `Alerta ${severeAlert.level === 'rojo' ? 'roja' : 'naranja'} activa en la zona: riesgo de tormenta cercana`
+    : '';
+
   // Global City/Street Semaphore
   const factors = [roadFactor.status, windFactor.status, tempFactor.status, visFactor.status];
   let streetSemaphore: { level: 'optimo' | 'precaucion' | 'peligroso'; title: string; badgeClass: string; icon: any } = {
@@ -162,7 +173,7 @@ export const MobilityCard: React.FC<MobilityCardProps> = ({
       badgeClass: 'bg-rose-950/90 border-rose-600/80 text-rose-200 animate-pulse',
       icon: XCircle,
     };
-  } else if (factors.includes('precaucion')) {
+  } else if (factors.includes('precaucion') || severeAlert) {
     streetSemaphore = {
       level: 'precaucion',
       title: 'Circulación con Precaución',
@@ -251,7 +262,9 @@ export const MobilityCard: React.FC<MobilityCardProps> = ({
                     {streetSemaphore.title}
                   </span>
                   <span className="text-[11px] opacity-90 font-medium">
-                    {streetSemaphore.level === 'optimo'
+                    {alertReasonText && streetSemaphore.level === 'precaucion'
+                      ? alertReasonText
+                      : streetSemaphore.level === 'optimo'
                       ? 'Asfalto seguro, sin ráfagas peligrosas'
                       : streetSemaphore.level === 'precaucion'
                       ? 'Atención a frenado o ráfagas de viento'

@@ -63,7 +63,8 @@ body {
 .sentinel-radar-marker {
   background: transparent !important;
   border: none !important;
-  width: auto !important;
+  width: max-content !important;
   height: auto !important;
+  white-space: nowrap !important;
 }
 

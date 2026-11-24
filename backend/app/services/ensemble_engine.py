@@ -1,5 +1,6 @@
 import math
 import re
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -128,6 +129,156 @@ def parse_metar_phenomenon(metar_data: Optional[Dict[str, Any]]) -> Tuple[Option
     return w_code, metar_wx_raw, is_precip
 
 
+_ADAPTIVE_WEIGHTS_CACHE: Dict[str, Any] = {}
+_ADAPTIVE_WEIGHTS_CACHE_TIME: float = 0.0
+_ADAPTIVE_WEIGHTS_TTL: float = 6 * 3600.0  # 6 hours cache
+
+STATIC_BASE_WEIGHTS = {
+    "with_wrf": {
+        "wrf_smn": 0.35,
+        "ecmwf_ifs025": 0.35,
+        "icon_seamless": 0.15,
+        "gfs_seamless": 0.15,
+    },
+    "without_wrf": {
+        "ecmwf_ifs025": 0.55,
+        "icon_seamless": 0.25,
+        "gfs_seamless": 0.20,
+    },
+    "with_wrf_aifs": {
+        "wrf_smn": 0.30,
+        "ecmwf_ifs025": 0.28,
+        "ecmwf_aifs025": 0.15,
+        "icon_seamless": 0.14,
+        "gfs_seamless": 0.13,
+    },
+    "without_wrf_aifs": {
+        "ecmwf_ifs025": 0.40,
+        "ecmwf_aifs025": 0.22,
+        "icon_seamless": 0.20,
+        "gfs_seamless": 0.18,
+    },
+}
+
+
+def clamp_and_renormalize_weights(
+    weights: Dict[str, float],
+    min_w: float = 0.08,
+    max_w: float = 0.45,
+    max_iter: int = 15,
+) -> Dict[str, float]:
+    """
+    Clamps weights to [min_w, max_w] and iteratively renormalizes so sum(weights) == 1.0.
+    Ensures no model dominates (max 0.45) or vanishes (min 0.08).
+    """
+    if not weights:
+        return {}
+
+    w = {k: max(0.001, float(v)) for k, v in weights.items()}
+    total = sum(w.values())
+    w = {k: v / total for k, v in w.items()}
+
+    for _ in range(max_iter):
+        clamped = {k: max(min_w, min(max_w, v)) for k, v in w.items()}
+        curr_sum = sum(clamped.values())
+        if abs(curr_sum - 1.0) < 1e-4:
+            return {k: round(v, 4) for k, v in clamped.items()}
+
+        fixed_keys = {k for k, v in clamped.items() if v <= min_w + 1e-5 or v >= max_w - 1e-5}
+        if len(fixed_keys) == len(clamped):
+            return {k: round(v / curr_sum, 4) for k, v in clamped.items()}
+
+        remaining = 1.0 - sum(clamped[k] for k in fixed_keys)
+        unfixed_sum = sum(clamped[k] for k in clamped if k not in fixed_keys)
+        if unfixed_sum > 0:
+            scale = remaining / unfixed_sum
+            for k in clamped:
+                if k not in fixed_keys:
+                    clamped[k] = clamped[k] * scale
+        w = clamped
+
+    return {k: round(v, 4) for k, v in w.items()}
+
+
+def get_adaptive_weights_state(
+    city_key: str = "rio_cuarto",
+    icao: str = "SAOC",
+    force_refresh: bool = False,
+    custom_path: Optional[str] = None,
+    database_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Computes adaptive weights based on real MAE against SAOC METAR over the past 14 days.
+    Safety Safeguard:
+      Only activates if at least 3 models have >= 48 hours matched against SAOC.
+      Otherwise, keeps static base weights intact.
+    Bounded Formula:
+      Weight proportional to 1 / (mae_temp_c + 0.35)^2, clamped to [0.08, 0.45] and sum == 1.0.
+    Cached for 6 hours in memory to protect Neon DB.
+    """
+    global _ADAPTIVE_WEIGHTS_CACHE, _ADAPTIVE_WEIGHTS_CACHE_TIME
+
+    now_ts = time.time()
+    cache_key = f"{city_key}:{icao}"
+    if not force_refresh and cache_key in _ADAPTIVE_WEIGHTS_CACHE:
+        if (now_ts - _ADAPTIVE_WEIGHTS_CACHE_TIME) < _ADAPTIVE_WEIGHTS_TTL:
+            return _ADAPTIVE_WEIGHTS_CACHE[cache_key]
+
+    try:
+        from ..database import get_model_accuracy_leaderboard
+        leaderboard = get_model_accuracy_leaderboard(
+            city=city_key,
+            icao=icao,
+            days=14,
+            custom_path=custom_path,
+            database_url=database_url,
+        )
+    except Exception:
+        leaderboard = []
+
+    lb_map = {item["model_source"]: item for item in leaderboard}
+    candidate_models = ["wrf_smn", "ecmwf_ifs025", "icon_seamless", "gfs_seamless"]
+    qualified_models = [
+        m for m in candidate_models
+        if lb_map.get(m, {}).get("samples_count", 0) >= 48 and lb_map.get(m, {}).get("mae_temperature_c") is not None
+    ]
+
+    samples_acc = max([lb_map.get(m, {}).get("samples_count", 0) for m in candidate_models], default=0)
+
+    if len(qualified_models) < 3:
+        state = {
+            "adaptive_weights_active": False,
+            "min_samples_required": 48,
+            "samples_accumulated": samples_acc,
+            "current_weights": dict(STATIC_BASE_WEIGHTS["with_wrf"]),
+            "reason": f"Solo {len(qualified_models)}/3 modelos con >= 48 muestras reales auditadas.",
+        }
+        _ADAPTIVE_WEIGHTS_CACHE[cache_key] = state
+        _ADAPTIVE_WEIGHTS_CACHE_TIME = now_ts
+        return state
+
+    raw_scores = {}
+    for m in candidate_models:
+        mae = lb_map.get(m, {}).get("mae_temperature_c")
+        if mae is not None:
+            raw_scores[m] = 1.0 / ((float(mae) + 0.35) ** 2)
+        else:
+            raw_scores[m] = 1.0 / ((1.5 + 0.35) ** 2)
+
+    clamped_weights = clamp_and_renormalize_weights(raw_scores, min_w=0.08, max_w=0.45)
+
+    state = {
+        "adaptive_weights_active": True,
+        "min_samples_required": 48,
+        "samples_accumulated": samples_acc,
+        "current_weights": clamped_weights,
+        "reason": f"{len(qualified_models)} modelos calificados con >= 48 muestras.",
+    }
+    _ADAPTIVE_WEIGHTS_CACHE[cache_key] = state
+    _ADAPTIVE_WEIGHTS_CACHE_TIME = now_ts
+    return state
+
+
 def generate_ensemble_forecast(
     city_key: str,
     open_meteo_data: Dict[str, Any],
@@ -140,6 +291,8 @@ def generate_ensemble_forecast(
     enable_ml: bool = True,
     metar_history_records: Optional[List[Dict[str, Any]]] = None,
     center_brightness_temp_c: Optional[float] = None,
+    custom_db_path: Optional[str] = None,
+    database_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Blends multi-model numerical forecasts:
@@ -195,6 +348,16 @@ def generate_ensemble_forecast(
     snapshots_to_save: List[Dict[str, Any]] = []
     models_active_set = set()
 
+    # Retrieve adaptive weights state (cached 6 hours, safe 48-sample gate)
+    adaptive_state = get_adaptive_weights_state(
+        city_key=city_key,
+        icao=metar_data.get("icao", "SAOC") if metar_data else "SAOC",
+        custom_path=custom_db_path,
+        database_url=database_url,
+    )
+    is_adaptive = adaptive_state.get("adaptive_weights_active", False)
+    ad_weights = adaptive_state.get("current_weights", {})
+
     # Pre-compute raw ensemble temperatures for temp_trend_3h feature
     raw_temps_series: List[float] = []
     for om_item in candidate_om_hourly:
@@ -231,23 +394,61 @@ def generate_ensemble_forecast(
         m_aifs = models_om.get("ecmwf_aifs025", {})
         wrf_item = wrf_map.get(t_utc)
 
-        # Decide weights
+        # Decide weights (Adaptive weights if active, otherwise static base weights)
         use_wrf = wrf_available and (wrf_item is not None)
-        if aifs_active and m_aifs.get("temperature_c") is not None:
-            if use_wrf:
-                weights = {"wrf": 0.30, "ecmwf": 0.28, "aifs": 0.15, "icon": 0.14, "gfs": 0.13}
-                models_active_set.add("wrf_smn")
+        if is_adaptive and ad_weights:
+            if aifs_active and m_aifs.get("temperature_c") is not None and "ecmwf_aifs025" in ad_weights:
+                if use_wrf:
+                    w_dict = {
+                        "wrf": ad_weights.get("wrf_smn", 0.30),
+                        "ecmwf": ad_weights.get("ecmwf_ifs025", 0.28),
+                        "aifs": ad_weights.get("ecmwf_aifs025", 0.15),
+                        "icon": ad_weights.get("icon_seamless", 0.14),
+                        "gfs": ad_weights.get("gfs_seamless", 0.13),
+                    }
+                    models_active_set.add("wrf_smn")
+                else:
+                    w_dict = {
+                        "ecmwf": ad_weights.get("ecmwf_ifs025", 0.40),
+                        "aifs": ad_weights.get("ecmwf_aifs025", 0.22),
+                        "icon": ad_weights.get("icon_seamless", 0.20),
+                        "gfs": ad_weights.get("gfs_seamless", 0.18),
+                    }
+                models_active_set.add("ecmwf_aifs025")
             else:
-                weights = {"ecmwf": 0.40, "aifs": 0.22, "icon": 0.20, "gfs": 0.18}
-            models_active_set.add("ecmwf_aifs025")
+                if use_wrf:
+                    w_dict = {
+                        "wrf": ad_weights.get("wrf_smn", 0.35),
+                        "ecmwf": ad_weights.get("ecmwf_ifs025", 0.35),
+                        "icon": ad_weights.get("icon_seamless", 0.15),
+                        "gfs": ad_weights.get("gfs_seamless", 0.15),
+                    }
+                    models_active_set.add("wrf_smn")
+                else:
+                    w_dict = {
+                        "ecmwf": ad_weights.get("ecmwf_ifs025", 0.55),
+                        "icon": ad_weights.get("icon_seamless", 0.25),
+                        "gfs": ad_weights.get("gfs_seamless", 0.20),
+                    }
+            tot_w = sum(w_dict.values())
+            weights = {k: v / tot_w for k, v in w_dict.items()} if tot_w > 0 else w_dict
+            models_active_set.update(["ecmwf_ifs025", "icon_seamless", "gfs_seamless"])
         else:
-            if use_wrf:
-                weights = {"wrf": 0.35, "ecmwf": 0.35, "icon": 0.15, "gfs": 0.15}
-                models_active_set.add("wrf_smn")
+            if aifs_active and m_aifs.get("temperature_c") is not None:
+                if use_wrf:
+                    weights = {"wrf": 0.30, "ecmwf": 0.28, "aifs": 0.15, "icon": 0.14, "gfs": 0.13}
+                    models_active_set.add("wrf_smn")
+                else:
+                    weights = {"ecmwf": 0.40, "aifs": 0.22, "icon": 0.20, "gfs": 0.18}
+                models_active_set.add("ecmwf_aifs025")
             else:
-                weights = {"ecmwf": 0.55, "icon": 0.25, "gfs": 0.20}
+                if use_wrf:
+                    weights = {"wrf": 0.35, "ecmwf": 0.35, "icon": 0.15, "gfs": 0.15}
+                    models_active_set.add("wrf_smn")
+                else:
+                    weights = {"ecmwf": 0.55, "icon": 0.25, "gfs": 0.20}
 
-        models_active_set.update(["ecmwf_ifs025", "icon_seamless", "gfs_seamless"])
+            models_active_set.update(["ecmwf_ifs025", "icon_seamless", "gfs_seamless"])
 
         # Gather temperatures
         temps = {
@@ -498,6 +699,23 @@ def generate_ensemble_forecast(
         blended_hourly.append(hourly_record)
 
         if step_idx < 3:
+            # 1. Ensemble ML (final output after ML adjustment)
+            snapshots_to_save.append({
+                "target_time_utc": t_utc,
+                "predicted_temp_c": final_temp,
+                "predicted_wind_kmh": final_wind,
+                "predicted_precip_mm": round(ens_precip, 2),
+                "model_source": "ensemble_ml",
+            })
+            # 2. Ensemble Raw (physics weighted base before ML)
+            snapshots_to_save.append({
+                "target_time_utc": t_utc,
+                "predicted_temp_c": raw_ens_temp,
+                "predicted_wind_kmh": raw_ens_wind,
+                "predicted_precip_mm": round(ens_precip, 2),
+                "model_source": "ensemble_raw",
+            })
+            # 3. Legacy alias "ensemble"
             snapshots_to_save.append({
                 "target_time_utc": t_utc,
                 "predicted_temp_c": raw_ens_temp,
@@ -505,10 +723,56 @@ def generate_ensemble_forecast(
                 "predicted_precip_mm": round(ens_precip, 2),
                 "model_source": "ensemble",
             })
+            # 4. Individual active NWP models
+            if "wrf" in models_comp and models_comp["wrf"].get("temperature_c") is not None:
+                snapshots_to_save.append({
+                    "target_time_utc": t_utc,
+                    "predicted_temp_c": models_comp["wrf"].get("temperature_c"),
+                    "predicted_wind_kmh": models_comp["wrf"].get("wind_speed_kmh"),
+                    "predicted_precip_mm": round(models_comp["wrf"].get("precip_mm") or 0.0, 2),
+                    "model_source": "wrf_smn",
+                })
+            if "ecmwf" in models_comp and models_comp["ecmwf"].get("temperature_c") is not None:
+                snapshots_to_save.append({
+                    "target_time_utc": t_utc,
+                    "predicted_temp_c": models_comp["ecmwf"].get("temperature_c"),
+                    "predicted_wind_kmh": models_comp["ecmwf"].get("wind_speed_kmh"),
+                    "predicted_precip_mm": round(models_comp["ecmwf"].get("precip_mm") or 0.0, 2),
+                    "model_source": "ecmwf_ifs025",
+                })
+            if "aifs" in models_comp and models_comp["aifs"].get("temperature_c") is not None:
+                snapshots_to_save.append({
+                    "target_time_utc": t_utc,
+                    "predicted_temp_c": models_comp["aifs"].get("temperature_c"),
+                    "predicted_wind_kmh": models_comp["aifs"].get("wind_speed_kmh"),
+                    "predicted_precip_mm": round(models_comp["aifs"].get("precip_mm") or 0.0, 2),
+                    "model_source": "ecmwf_aifs025",
+                })
+            if "icon" in models_comp and models_comp["icon"].get("temperature_c") is not None:
+                snapshots_to_save.append({
+                    "target_time_utc": t_utc,
+                    "predicted_temp_c": models_comp["icon"].get("temperature_c"),
+                    "predicted_wind_kmh": models_comp["icon"].get("wind_speed_kmh"),
+                    "predicted_precip_mm": round(models_comp["icon"].get("precip_mm") or 0.0, 2),
+                    "model_source": "icon_seamless",
+                })
+            if "gfs" in models_comp and models_comp["gfs"].get("temperature_c") is not None:
+                snapshots_to_save.append({
+                    "target_time_utc": t_utc,
+                    "predicted_temp_c": models_comp["gfs"].get("temperature_c"),
+                    "predicted_wind_kmh": models_comp["gfs"].get("wind_speed_kmh"),
+                    "predicted_precip_mm": round(models_comp["gfs"].get("precip_mm") or 0.0, 2),
+                    "model_source": "gfs_seamless",
+                })
 
     if snapshots_to_save:
         try:
-            save_forecast_snapshots(city=city_key, snapshots=snapshots_to_save)
+            save_forecast_snapshots(
+                city=city_key,
+                snapshots=snapshots_to_save,
+                custom_path=custom_db_path,
+                database_url=database_url,
+            )
         except Exception:
             pass
 
@@ -743,6 +1007,8 @@ def generate_ensemble_forecast(
         "wrf_available": wrf_available,
         "overall_confidence": blended_hourly[0]["confidence"] if blended_hourly else "media",
         "ml_metadata": ml_corrector.get_metadata(),
+        "adaptive_weights_active": is_adaptive,
+        "current_weights": adaptive_state.get("current_weights", {}),
     }
 
 
@@ -752,10 +1018,13 @@ def generate_executive_summary(
     daily: List[Dict[str, Any]],
     hail_risk: Optional[Dict[str, Any]] = None,
     sentinel_front: Optional[Dict[str, Any]] = None,
+    alerts: Optional[List[Dict[str, Any]]] = None,
+    now_local: Optional[datetime] = None,
 ) -> str:
     """
     Generates a deterministic 1-liner executive forecast summary in natural Argentine Spanish.
     Strictly capped at 120 characters, 0 ms latency, no external LLM.
+    Respects nighttime context (>= 20:00 local) and active alerts.
     """
     # 1. Imminent hail alert
     if hail_risk and hail_risk.get("imminent_hail_alert"):
@@ -772,7 +1041,14 @@ def generate_executive_summary(
     w_code = current.get("weather_code", 0)
     is_precip = current.get("is_precipitating_now", False)
     curr_t = current.get("temperature_c")
-    now_local = datetime.now(timezone.utc).astimezone(CORDOBA_TZ)
+    if now_local is None:
+        now_local = datetime.now(timezone.utc).astimezone(CORDOBA_TZ)
+    is_night = now_local.hour >= 20 or now_local.hour < 6
+
+    # Evaluate active alerts and hail level
+    has_severe_alert = any(a.get("level") in ("naranja", "rojo") for a in (alerts or []))
+    hail_lvl = (hail_risk.get("level") or hail_risk.get("stage1_risk_level") or "sin_riesgo").lower() if hail_risk else "sin_riesgo"
+    has_mod_plus_hail = hail_lvl in ("moderado", "alto", "extremo")
 
     # 3. Active storm or rain now (strictly requires is_precip for rain, or active severe storm)
     if is_precip and w_code >= 51:
@@ -834,6 +1110,37 @@ def generate_executive_summary(
         elif (code in (51, 61, 63, 65) or prob >= 50) and upcoming_rain_hour is None:
             upcoming_rain_hour = dt_r.strftime("%H:00")
 
+    tomorrow_daily = daily[1] if len(daily) > 1 else (daily[0] if daily else {})
+    tomorrow_max = tomorrow_daily.get("temperature_max_c") if tomorrow_daily else (daily[0].get("temperature_max_c") if daily else curr_t)
+    curr_t_str = f" ({int(round(curr_t))} °C)" if curr_t is not None else ""
+    tom_max_str = f"; mañana máx. {int(round(tomorrow_max))} °C" if tomorrow_max is not None else ""
+
+    # Wind sector and intensity
+    wspd = current.get("wind_speed_kmh") or 0.0
+    wdir = current.get("wind_direction_deg")
+    wind_sector = "norte" if wdir is not None and (wdir <= 45 or wdir >= 315) else "sur" if wdir is not None and 135 <= wdir <= 225 else "este"
+    wind_intensity = "moderado" if wspd >= 18 else "leve"
+
+    # Nighttime execution (>= 20:00 or < 06:00)
+    if is_night:
+        if has_severe_alert or has_mod_plus_hail:
+            if upcoming_rain_hour or upcoming_is_storm:
+                hour_part = f" desde las {upcoming_rain_hour}" if upcoming_rain_hour else " en la madrugada"
+                summary = f"Noche inestable{curr_t_str}, riesgo de tormentas{hour_part}{tom_max_str}."
+            else:
+                summary = f"Noche inestable con alerta activa{curr_t_str}; vigilancia meteorológica{tom_max_str}."
+        elif upcoming_rain_hour:
+            phenom_txt = f"riesgo de tormentas desde las {upcoming_rain_hour}" if upcoming_is_storm else f"probables lluvias desde las {upcoming_rain_hour}"
+            summary = f"Noche parcialmente nublada{curr_t_str}, {phenom_txt}{tom_max_str}."
+        else:
+            night_type = "templada" if curr_t is not None and curr_t >= 18 else "fresca"
+            w_txt = f" y viento {wind_sector}" if wdir is not None else ""
+            summary = f"Noche {night_type}{curr_t_str}, cielo mayormente despejado{w_txt}{tom_max_str}."
+        if len(summary) > 120:
+            summary = summary[:117] + "..."
+        return summary
+
+    # Daytime execution (< 20:00 and >= 06:00)
     if upcoming_rain_hour:
         max_t = daily[0].get("temperature_max_c") if daily else curr_t
         t_part = f", máxima de {int(round(max_t))} °C" if max_t is not None else ""
@@ -843,7 +1150,13 @@ def generate_executive_summary(
             summary = f"Lluvias probables desde las {upcoming_rain_hour}{t_part} y descenso térmico."
         return summary[:120]
 
-    # 5. Stable / fair weather
+    if has_severe_alert or has_mod_plus_hail:
+        max_t = daily[0].get("temperature_max_c") if daily else curr_t
+        t_part = f", máxima de {int(round(max_t))} °C" if max_t is not None else ""
+        summary = f"Ambiente inestable con alerta meteorológica activa{curr_t_str}{t_part}; vigilancia de tormentas."
+        return summary[:120]
+
+    # 5. Stable / fair weather daytime
     max_t = daily[0].get("temperature_max_c") if daily else curr_t
     wspd = current.get("wind_speed_kmh") or 0.0
     wdir = current.get("wind_direction_deg")

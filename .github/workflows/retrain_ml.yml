@@ -1,0 +1,51 @@
+name: Reentrenamiento Mensual ML
+
+on:
+  schedule:
+    # Día 1 de cada mes a las 06:00 UTC (03:00 hora Córdoba)
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+
+jobs:
+  monthly-retrain:
+    name: Reentrenar Modelo LightGBM desde Neon
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Instalar Dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Ejecutar Pipeline de Reentrenamiento
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::warning::Secret DATABASE_URL no configurado en GitHub Actions. Saliendo limpio."
+            exit 0
+          fi
+          python scripts/retrain_from_neon.py
+
+      - name: Commit y Push si hubo Mejora Validada
+        run: |
+          if [ -n "$(git status --porcelain backend/models/)" ]; then
+            echo "Se detectaron mejoras validadas en backend/models/. Guardando commit..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add backend/models/
+            git commit -m "chore(ml): update monthly retrained bias model [skip ci]"
+            git push origin master
+          else
+            echo "Sin cambios en backend/models/ (se mantiene modelo vigente base v1)."
+          fi

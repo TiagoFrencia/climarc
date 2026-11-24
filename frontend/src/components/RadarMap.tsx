@@ -68,9 +68,14 @@ function createSentinelIcon(s: SentinelStationSummary) {
     ? 'rgba(30, 41, 59, 0.92)'
     : 'rgba(71, 85, 105, 0.85)';
   const borderColor = s.is_central ? '#38BDF8' : isOp ? '#64748B' : '#475569';
+  const transformStyle = s.is_central
+    ? 'transform: translate(-50%, -145%);'
+    : 'transform: translate(-50%, -120%);';
 
   return L.divIcon({
     className: 'sentinel-radar-marker',
+    iconSize: undefined,
+    iconAnchor: [0, 0],
     html: `
       <div style="
         display: inline-flex;
@@ -87,6 +92,7 @@ function createSentinelIcon(s: SentinelStationSummary) {
         font-weight: 700;
         white-space: nowrap;
         pointer-events: auto;
+        ${transformStyle}
       ">
         <span style="color: #94A3B8; font-size: 8.5px;">${s.icao}</span>
         <span style="color: #38BDF8;">${tempStr}</span>
@@ -104,7 +110,6 @@ function createSentinelIcon(s: SentinelStationSummary) {
         }
       </div>
     `,
-    iconAnchor: [35, 22],
   });
 }
 

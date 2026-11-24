@@ -50,10 +50,10 @@ export async function fetchRadar(): Promise<RadarResponse> {
   return handleResponse<RadarResponse>(res);
 }
 
-export async function fetchAccuracy(city: string = 'rio_cuarto'): Promise<AccuracyResponse> {
+export async function fetchAccuracy(city: string = 'rio_cuarto', days: number = 7): Promise<AccuracyResponse> {
   const targetUrl = API_BASE_URL
-    ? `${API_BASE_URL}/api/accuracy?city=${encodeURIComponent(city)}`
-    : `/api/accuracy?city=${encodeURIComponent(city)}`;
+    ? `${API_BASE_URL}/api/accuracy?city=${encodeURIComponent(city)}&days=${days}`
+    : `/api/accuracy?city=${encodeURIComponent(city)}&days=${days}`;
   const res = await fetch(targetUrl);
   return handleResponse<AccuracyResponse>(res);
 }
